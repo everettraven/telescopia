@@ -5,23 +5,25 @@ import (
 	"fmt"
 	"strings"
 
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/rest"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"k8s.io/client-go/tools/cache"
+	crcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 )
 
 // ScopeInformerFactory is a function that is used to create a
-// ScopeInformer for the provided GVR and SharedInformerOptions.
+// informers.GenericInformer for the provided GVR and SharedInformerOptions.
 // It is up to the function to properly implement any error
 // handling logic for the informer losing permissions.
-type ScopeInformerFactory func(gvr schema.GroupVersionResource, options ...informers.SharedInformerOption) (*ScopeInformer, error)
+type ScopeInformerFactory func(gvr schema.GroupVersionResource, options ...informers.SharedInformerOption) (informers.GenericInformer, error)
 
 // ScopedCache is a wrapper around the
 // NamespaceScopedCache and ClusterScopedCache
@@ -65,8 +67,8 @@ func WithScopedInformerFactory(sif ScopeInformerFactory) ScopedCacheOption {
 	}
 }
 
-func ScopedCacheBuilder(scOpts ...ScopedCacheOption) cache.NewCacheFunc {
-	return func(config *rest.Config, opts cache.Options) (cache.Cache, error) {
+func ScopedCacheBuilder(scOpts ...ScopedCacheOption) crcache.NewCacheFunc {
+	return func(config *rest.Config, opts crcache.Options) (crcache.Cache, error) {
 		opts, err := defaultOpts(config, opts)
 		if err != nil {
 			return nil, err
@@ -87,6 +89,7 @@ func ScopedCacheBuilder(scOpts ...ScopedCacheOption) cache.NewCacheFunc {
 // client.Reader implementation
 // ----------------------
 
+// TODO: Figure out how to handle the case where an informer does not exist and one needs to be created.
 func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client.Object) error {
 	var fetchObj runtime.Object
 	isNamespaced, err := IsAPINamespaced(obj, sc.Scheme, sc.RESTMapper)
@@ -118,6 +121,7 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 	return nil
 }
 
+// TODO: Figure out how to handle the case where an informer does not exist and one needs to be created.
 func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	listOpts := client.ListOptions{}
 	listOpts.ApplyOptions(opts)
@@ -197,23 +201,51 @@ func deduplicateList(objs []runtime.Object) ([]runtime.Object, error) {
 // cache.Informers implementation
 // ----------------------
 
-func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (cache.Informer, error) {
+func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (crcache.Informer, error) {
 	mapping, err := sc.RESTMapper.RESTMapping(obj.GetObjectKind().GroupVersionKind().GroupKind())
 	if err != nil {
 		return nil, err
 	}
 
+	// obj could have an empty GVK, lets make sure we have a proper gvk
+	gvk, err := apiutil.GVKForObject(obj, sc.Scheme)
+	if err != nil {
+		return nil, fmt.Errorf("encountered an error getting GVK for object: %w", err)
+	}
+
 	// TODO: Figure out the best way to add the created informer to the corresponding cache
 	// Question - Does this only ever get called for cluster scoped?
 
-	if obj.GetNamespace() != v1.NamespaceAll {
-		return sc.scopeInformerFactory(mapping.Resource, informers.WithNamespace(obj.GetNamespace()))
+	// create the informer options
+	infOpts := InformerOptions{
+		Gvk:       gvk,
+		Key:       fmt.Sprintf("scopedcache-getinformer-%s", hashObject(obj)),
+		Dependent: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{UID: types.UID(hashObject(obj))}},
 	}
 
-	return sc.scopeInformerFactory(mapping.Resource)
+	var inf informers.GenericInformer
+
+	if obj.GetNamespace() != corev1.NamespaceAll {
+		inf, err = sc.scopeInformerFactory(mapping.Resource, informers.WithNamespace(obj.GetNamespace()))
+		if err != nil {
+			return nil, err
+		}
+
+		infOpts.Namespace = obj.GetNamespace()
+		infOpts.Informer = inf
+	} else {
+		inf, err = sc.scopeInformerFactory(mapping.Resource)
+		if err != nil {
+			return nil, err
+		}
+		infOpts.Informer = inf
+	}
+
+	sc.AddInformer(infOpts)
+	return inf.Informer(), nil
 }
 
-func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupVersionKind) (cache.Informer, error) {
+func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupVersionKind) (crcache.Informer, error) {
 	mapping, err := sc.RESTMapper.RESTMapping(gvk.GroupKind())
 	if err != nil {
 		return nil, err
@@ -221,8 +253,21 @@ func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupV
 
 	// TODO: Figure out the best way to add the created informer to the cache
 	// Question - Does this only ever get called for cluster scoped?
+	// create the informer options
+	infOpts := InformerOptions{
+		Gvk:       gvk,
+		Key:       fmt.Sprintf("scopedcache-getinformer-%s", hashObject(gvk)),
+		Dependent: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{UID: types.UID(hashObject(gvk))}},
+	}
 
-	return sc.scopeInformerFactory(mapping.Resource)
+	inf, err := sc.scopeInformerFactory(mapping.Resource)
+	if err != nil {
+		return nil, err
+	}
+	infOpts.Informer = inf
+
+	sc.AddInformer(infOpts)
+	return inf.Informer(), nil
 }
 
 func (sc *ScopedCache) Start(ctx context.Context) error {
@@ -235,13 +280,44 @@ func (sc *ScopedCache) Start(ctx context.Context) error {
 }
 
 func (sc *ScopedCache) WaitForCacheSync(ctx context.Context) bool {
-	// TODO: figure out how to properly implement this with the new layered approach
-	return true
+	return sc.clusterCache.Synced() && sc.nsCache.Synced()
 }
 
 func (sc *ScopedCache) IndexField(ctx context.Context, obj client.Object, field string, extractValue client.IndexerFunc) error {
-	// TODO: figure out how to properly implement this with the new layered approach
-	return fmt.Errorf("UNIMPLEMENTED")
+	// obj could have an empty GVK, lets make sure we have a proper gvk
+	gvk, err := apiutil.GVKForObject(obj, sc.Scheme)
+	if err != nil {
+		return fmt.Errorf("encountered an error getting GVK for object: %w", err)
+	}
+
+	indexFunc := func(objRaw interface{}) ([]string, error) {
+		obj, isObj := objRaw.(client.Object)
+		if !isObj {
+			return nil, fmt.Errorf("object of type %T is not client.Object", objRaw)
+		}
+		return extractValue(obj), nil
+	}
+
+	indexer := cache.Indexers{fmt.Sprintf("field:%s", field): indexFunc}
+
+	// for now, add the indexer to all the informers for a gvk
+	if obj.GetNamespace() != corev1.NamespaceAll {
+		for _, inf := range sc.nsCache.Namespaces[obj.GetNamespace()][gvk] {
+			err := inf.AddIndexers(indexer)
+			if err != nil {
+				return err
+			}
+		}
+	} else {
+		for _, inf := range sc.clusterCache.GvkInformers[gvk] {
+			err := inf.AddIndexers(indexer)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 // ----------------------
