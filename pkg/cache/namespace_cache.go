@@ -2,7 +2,10 @@ package cache
 
 import (
 	"fmt"
+	"strings"
+	"sync"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -12,6 +15,7 @@ import (
 type NamespaceScopedCache struct {
 	Namespaces map[string]GvkToInformers
 	started    bool
+	mu         sync.Mutex
 }
 
 func NewNamespaceScopedCache() *NamespaceScopedCache {
@@ -22,6 +26,8 @@ func NewNamespaceScopedCache() *NamespaceScopedCache {
 }
 
 func (nsc *NamespaceScopedCache) Get(key types.NamespacedName, gvk schema.GroupVersionKind) (runtime.Object, error) {
+	nsc.mu.Lock()
+	defer nsc.mu.Unlock()
 	found := false
 	var obj runtime.Object
 	var err error
@@ -46,11 +52,13 @@ func (nsc *NamespaceScopedCache) Get(key types.NamespacedName, gvk schema.GroupV
 	if found {
 		return obj, nil
 	} else {
-		return nil, fmt.Errorf("could not find the given resource")
+		return nil, errors.NewNotFound(schema.GroupResource{Group: gvk.Group, Resource: strings.ToLower(gvk.Kind) + "s"}, "could not find the given resource")
 	}
 }
 
 func (nsc *NamespaceScopedCache) List(listOpts client.ListOptions, gvk schema.GroupVersionKind) ([]runtime.Object, error) {
+	nsc.mu.Lock()
+	defer nsc.mu.Unlock()
 	retList := []runtime.Object{}
 	if listOpts.Namespace != "" {
 		if _, ok := nsc.Namespaces[listOpts.Namespace]; !ok {
@@ -101,6 +109,8 @@ func (nsc *NamespaceScopedCache) List(listOpts client.ListOptions, gvk schema.Gr
 }
 
 func (nsc *NamespaceScopedCache) AddInformer(infOpts InformerOptions) {
+	nsc.mu.Lock()
+	defer nsc.mu.Unlock()
 	if _, ok := nsc.Namespaces[infOpts.Namespace]; !ok {
 		nsc.Namespaces[infOpts.Namespace] = make(GvkToInformers)
 	}
@@ -110,6 +120,10 @@ func (nsc *NamespaceScopedCache) AddInformer(infOpts InformerOptions) {
 	}
 
 	si := NewScopeInformer(infOpts.Informer)
+	removeFromCache := func() {
+		nsc.RemoveInformer(infOpts)
+	}
+	si.SetWatchErrorHandler(WatchErrorHandlerForScopeInformer(si, removeFromCache))
 	if nsc.IsStarted() {
 		go si.Run()
 	}
@@ -127,6 +141,8 @@ func (nsc *NamespaceScopedCache) AddInformer(infOpts InformerOptions) {
 }
 
 func (nsc *NamespaceScopedCache) RemoveInformer(infOpts InformerOptions) {
+	nsc.mu.Lock()
+	defer nsc.mu.Unlock()
 	// remove the dependent resource from the informer
 	si := nsc.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key]
 
@@ -139,6 +155,8 @@ func (nsc *NamespaceScopedCache) RemoveInformer(infOpts InformerOptions) {
 }
 
 func (nsc *NamespaceScopedCache) Start() {
+	nsc.mu.Lock()
+	defer nsc.mu.Unlock()
 	for nsKey := range nsc.Namespaces {
 		for gvkKey := range nsc.Namespaces[nsKey] {
 			for _, si := range nsc.Namespaces[nsKey][gvkKey] {
@@ -154,6 +172,8 @@ func (nsc *NamespaceScopedCache) IsStarted() bool {
 }
 
 func (nsc *NamespaceScopedCache) Synced() bool {
+	nsc.mu.Lock()
+	defer nsc.mu.Unlock()
 	for nsKey := range nsc.Namespaces {
 		for gvkKey := range nsc.Namespaces[nsKey] {
 			for _, si := range nsc.Namespaces[nsKey][gvkKey] {
@@ -165,4 +185,17 @@ func (nsc *NamespaceScopedCache) Synced() bool {
 	}
 
 	return true
+}
+
+func (nsc *NamespaceScopedCache) GvkHasInformer(infOpts InformerOptions) bool {
+	nsc.mu.Lock()
+	defer nsc.mu.Unlock()
+	has := false
+	if _, nsOk := nsc.Namespaces[infOpts.Namespace]; nsOk {
+		if _, gvkOk := nsc.Namespaces[infOpts.Namespace][infOpts.Gvk]; gvkOk {
+			has = true
+		}
+	}
+
+	return has
 }

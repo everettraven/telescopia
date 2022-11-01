@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
@@ -90,12 +91,9 @@ func ScopedCacheBuilder(scOpts ...ScopedCacheOption) crcache.NewCacheFunc {
 // ----------------------
 
 // TODO: Figure out how to handle the case where an informer does not exist and one needs to be created.
+// TODO: Should we create SSAR requests to determine whether or not the operator has the proper permissions?
 func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client.Object) error {
 	var fetchObj runtime.Object
-	isNamespaced, err := IsAPINamespaced(obj, sc.Scheme, sc.RESTMapper)
-	if err != nil {
-		return err
-	}
 
 	// obj could have an empty GVK, lets make sure we have a proper gvk
 	gvk, err := apiutil.GVKForObject(obj, sc.Scheme)
@@ -105,7 +103,8 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 
 	_, gvkClusterScoped := sc.clusterCache.GvkInformers[gvk]
 
-	if !isNamespaced || gvkClusterScoped || len(sc.nsCache.Namespaces) == 0 {
+	// TODO: This isn't a valid check but is in place temporarily for testing. FIX THIS!!!!
+	if gvkClusterScoped {
 		fetchObj, err = sc.clusterCache.Get(key, gvk)
 		if err != nil {
 			return err
@@ -117,7 +116,13 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 		}
 	}
 
-	obj = fetchObj.(client.Object)
+	outVal := reflect.ValueOf(obj)
+	objVal := reflect.ValueOf(fetchObj)
+	if !objVal.Type().AssignableTo(outVal.Type()) {
+		return fmt.Errorf("cache had type %s, but %s was asked for", objVal.Type(), outVal.Type())
+	}
+	reflect.Indirect(outVal).Set(reflect.Indirect(objVal))
+
 	return nil
 }
 
@@ -127,11 +132,6 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 	listOpts.ApplyOptions(opts)
 
 	var objs []runtime.Object
-
-	isNamespaced, err := IsAPINamespaced(list, sc.Scheme, sc.RESTMapper)
-	if err != nil {
-		return err
-	}
 
 	// obj could have an empty GVK, lets make sure we have a proper gvk
 	gvk, err := apiutil.GVKForObject(list, sc.Scheme)
@@ -152,7 +152,7 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 		return err
 	}
 
-	if !isNamespaced || gvkClusterScoped || len(sc.nsCache.Namespaces) == 0 {
+	if gvkClusterScoped {
 		// Look at the global cache to get the objects with the specified GVK
 		objs, err = sc.clusterCache.List(listOpts, gvkForListItems)
 		if err != nil {
@@ -181,15 +181,16 @@ func deduplicateList(objs []runtime.Object) ([]runtime.Object, error) {
 	objList := []runtime.Object{}
 
 	for _, obj := range objs {
+		cpObj := obj.DeepCopyObject()
 		// turn runtime.Object to a client.Object so we can get the resource UID
-		crObj, ok := obj.(client.Object)
+		crObj, ok := cpObj.(client.Object)
 		if !ok {
 			return nil, fmt.Errorf("could not convert list item to client.Object")
 		}
 		// if the UID of the resource is not already in the map then it is a new object
 		// and can be added to the list.
 		if _, ok := uidMap[crObj.GetUID()]; !ok {
-			objList = append(objList, obj)
+			objList = append(objList, cpObj)
 		}
 	}
 
@@ -202,10 +203,7 @@ func deduplicateList(objs []runtime.Object) ([]runtime.Object, error) {
 // ----------------------
 
 func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (crcache.Informer, error) {
-	mapping, err := sc.RESTMapper.RESTMapping(obj.GetObjectKind().GroupVersionKind().GroupKind())
-	if err != nil {
-		return nil, err
-	}
+	fmt.Println("XXX ScopedCache.GetInformer()")
 
 	// obj could have an empty GVK, lets make sure we have a proper gvk
 	gvk, err := apiutil.GVKForObject(obj, sc.Scheme)
@@ -213,8 +211,10 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (crca
 		return nil, fmt.Errorf("encountered an error getting GVK for object: %w", err)
 	}
 
-	// TODO: Figure out the best way to add the created informer to the corresponding cache
-	// Question - Does this only ever get called for cluster scoped?
+	mapping, err := sc.RESTMapper.RESTMapping(gvk.GroupKind())
+	if err != nil {
+		return nil, err
+	}
 
 	// create the informer options
 	infOpts := InformerOptions{
@@ -226,23 +226,40 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (crca
 	var inf informers.GenericInformer
 
 	if obj.GetNamespace() != corev1.NamespaceAll {
-		inf, err = sc.scopeInformerFactory(mapping.Resource, informers.WithNamespace(obj.GetNamespace()))
-		if err != nil {
-			return nil, err
-		}
-
+		fmt.Println("XXX ScopedCache.GetInformer() -- Namespaced!")
 		infOpts.Namespace = obj.GetNamespace()
-		infOpts.Informer = inf
-	} else {
-		inf, err = sc.scopeInformerFactory(mapping.Resource)
-		if err != nil {
-			return nil, err
-		}
-		infOpts.Informer = inf
-	}
 
-	sc.AddInformer(infOpts)
-	return inf.Informer(), nil
+		if si, ok := sc.nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key]; !ok {
+			fmt.Println("XXX ScopedCache.GetInformer() -- Adding informer to namespace:", infOpts.Namespace)
+			inf, err = sc.scopeInformerFactory(mapping.Resource, informers.WithNamespace(obj.GetNamespace()))
+			if err != nil {
+				return nil, err
+			}
+
+			infOpts.Informer = inf
+			sc.AddInformer(infOpts)
+			return sc.nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key], nil
+		} else {
+			fmt.Println("XXX ScopedCache.GetInformer() -- Informer already exists, returning it")
+			return si, nil
+		}
+	} else {
+		fmt.Println("XXX ScopedCache.GetInformer() -- Clustered!")
+		if si, ok := sc.clusterCache.GvkInformers[infOpts.Gvk][infOpts.Key]; !ok {
+			fmt.Println("XXX ScopedCache.GetInformer() -- Adding informer to cluster cache")
+			inf, err = sc.scopeInformerFactory(mapping.Resource)
+			if err != nil {
+				return nil, err
+			}
+
+			infOpts.Informer = inf
+			sc.AddInformer(infOpts)
+			return sc.clusterCache.GvkInformers[infOpts.Gvk][infOpts.Key], nil
+		} else {
+			fmt.Println("XXX ScopedCache.GetInformer() -- Informer already exists, returning it")
+			return si, nil
+		}
+	}
 }
 
 func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupVersionKind) (crcache.Informer, error) {
@@ -280,7 +297,16 @@ func (sc *ScopedCache) Start(ctx context.Context) error {
 }
 
 func (sc *ScopedCache) WaitForCacheSync(ctx context.Context) bool {
-	return sc.clusterCache.Synced() && sc.nsCache.Synced()
+	synced := false
+	for {
+		synced = sc.clusterCache.Synced() && sc.nsCache.Synced()
+		if !synced {
+			continue
+		}
+		break
+	}
+
+	return synced
 }
 
 func (sc *ScopedCache) IndexField(ctx context.Context, obj client.Object, field string, extractValue client.IndexerFunc) error {
@@ -337,6 +363,14 @@ func (sc *ScopedCache) RemoveInformer(infOpts InformerOptions) {
 		sc.nsCache.RemoveInformer(infOpts)
 	} else {
 		sc.clusterCache.RemoveInformer(infOpts)
+	}
+}
+
+func (sc *ScopedCache) GvkHasInformer(infOpts InformerOptions) bool {
+	if infOpts.Namespace != "" {
+		return sc.nsCache.GvkHasInformer(infOpts)
+	} else {
+		return sc.clusterCache.GvkHasInformer(infOpts)
 	}
 }
 

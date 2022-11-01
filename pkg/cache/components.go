@@ -2,9 +2,11 @@ package cache
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -35,17 +37,18 @@ type ScopeInformer struct {
 	// The resources that are dependent
 	// on this informer
 	dependents map[types.UID]metav1.Object
-}
 
-// TODO: Add helpful functions for ^
+	eventListeners map[string]cache.ResourceEventHandler
+}
 
 func NewScopeInformer(informer informers.GenericInformer) *ScopeInformer {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &ScopeInformer{
-		informer:   informer,
-		ctx:        ctx,
-		cancel:     cancel,
-		dependents: make(map[types.UID]metav1.Object),
+		informer:       informer,
+		ctx:            ctx,
+		cancel:         cancel,
+		dependents:     make(map[types.UID]metav1.Object),
+		eventListeners: make(map[string]cache.ResourceEventHandler),
 	}
 }
 
@@ -89,11 +92,21 @@ func (si *ScopeInformer) List(listOpts client.ListOptions) ([]runtime.Object, er
 }
 
 func (si *ScopeInformer) AddEventHandler(handler cache.ResourceEventHandler) {
-	si.informer.Informer().AddEventHandler(handler)
+	key := fmt.Sprintf("scopeinformer-addeventhandler-%s", hashObject(handler))
+	// only add the event listener if it hasn't already been added to this informer
+	if _, ok := si.eventListeners[key]; !ok {
+		si.eventListeners[key] = handler
+		si.informer.Informer().AddEventHandler(handler)
+	}
 }
 
 func (si *ScopeInformer) AddEventHandlerWithResyncPeriod(handler cache.ResourceEventHandler, resyncPeriod time.Duration) {
-	si.informer.Informer().AddEventHandlerWithResyncPeriod(handler, resyncPeriod)
+	key := fmt.Sprintf("scopeinformer-addeventhandlerwithresyncperiod-%s", hashObject(handler))
+	// only add the event listener if it hasn't already been added to this informer
+	if _, ok := si.eventListeners[key]; !ok {
+		si.eventListeners[key] = handler
+		si.informer.Informer().AddEventHandlerWithResyncPeriod(handler, resyncPeriod)
+	}
 }
 
 func (si *ScopeInformer) AddIndexers(indexers cache.Indexers) error {
@@ -102,6 +115,10 @@ func (si *ScopeInformer) AddIndexers(indexers cache.Indexers) error {
 
 func (si *ScopeInformer) HasSynced() bool {
 	return si.informer.Informer().HasSynced()
+}
+
+func (si *ScopeInformer) SetWatchErrorHandler(handler cache.WatchErrorHandler) error {
+	return si.informer.Informer().SetWatchErrorHandler(handler)
 }
 
 // Informers is a mapping of a string
@@ -143,4 +160,17 @@ func (infe *InformerNotFoundErr) Error() string {
 func IsInformerNotFoundErr(err error) bool {
 	_, ok := err.(*InformerNotFoundErr)
 	return ok
+}
+
+func WatchErrorHandlerForScopeInformer(si *ScopeInformer, removeFromCache func()) func(r *cache.Reflector, err error) {
+	return func(r *cache.Reflector, err error) {
+		if errors.IsForbidden(err) {
+			// reset dependents
+			si.dependents = make(map[types.UID]metav1.Object)
+			// remove from cache
+			removeFromCache()
+			// terminate informer
+			si.Terminate()
+		}
+	}
 }

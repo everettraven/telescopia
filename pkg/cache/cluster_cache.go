@@ -2,6 +2,7 @@ package cache
 
 import (
 	"fmt"
+	"sync"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -12,6 +13,7 @@ import (
 type ClusterScopedCache struct {
 	GvkInformers GvkToInformers
 	started      bool
+	mu           sync.Mutex
 }
 
 func NewClusterScopedCache() *ClusterScopedCache {
@@ -22,6 +24,8 @@ func NewClusterScopedCache() *ClusterScopedCache {
 }
 
 func (csc *ClusterScopedCache) Get(key types.NamespacedName, gvk schema.GroupVersionKind) (runtime.Object, error) {
+	csc.mu.Lock()
+	defer csc.mu.Unlock()
 	found := false
 	var obj runtime.Object
 	var err error
@@ -47,6 +51,8 @@ func (csc *ClusterScopedCache) Get(key types.NamespacedName, gvk schema.GroupVer
 }
 
 func (csc *ClusterScopedCache) List(listOpts client.ListOptions, gvk schema.GroupVersionKind) ([]runtime.Object, error) {
+	csc.mu.Lock()
+	defer csc.mu.Unlock()
 	retList := []runtime.Object{}
 
 	if _, ok := csc.GvkInformers[gvk]; !ok {
@@ -73,11 +79,17 @@ func (csc *ClusterScopedCache) List(listOpts client.ListOptions, gvk schema.Grou
 }
 
 func (csc *ClusterScopedCache) AddInformer(infOpts InformerOptions) {
+	csc.mu.Lock()
+	defer csc.mu.Unlock()
 	if _, ok := csc.GvkInformers[infOpts.Gvk]; !ok {
 		csc.GvkInformers[infOpts.Gvk] = make(Informers)
 	}
 
 	si := NewScopeInformer(infOpts.Informer)
+	removeFromCache := func() {
+		csc.RemoveInformer(infOpts)
+	}
+	si.SetWatchErrorHandler(WatchErrorHandlerForScopeInformer(si, removeFromCache))
 	if csc.IsStarted() {
 		go si.Run()
 	}
@@ -94,6 +106,8 @@ func (csc *ClusterScopedCache) AddInformer(infOpts InformerOptions) {
 }
 
 func (csc *ClusterScopedCache) RemoveInformer(infOpts InformerOptions) {
+	csc.mu.Lock()
+	defer csc.mu.Unlock()
 	// remove the dependent resource from the informer
 	si := csc.GvkInformers[infOpts.Gvk][infOpts.Key]
 
@@ -106,6 +120,8 @@ func (csc *ClusterScopedCache) RemoveInformer(infOpts InformerOptions) {
 }
 
 func (csc *ClusterScopedCache) Start() {
+	csc.mu.Lock()
+	defer csc.mu.Unlock()
 	for gvkKey := range csc.GvkInformers {
 		for _, si := range csc.GvkInformers[gvkKey] {
 			go si.Run()
@@ -120,6 +136,8 @@ func (csc *ClusterScopedCache) IsStarted() bool {
 }
 
 func (csc *ClusterScopedCache) Synced() bool {
+	csc.mu.Lock()
+	defer csc.mu.Unlock()
 	for gvkKey := range csc.GvkInformers {
 		for _, si := range csc.GvkInformers[gvkKey] {
 			if !si.HasSynced() {
@@ -129,4 +147,11 @@ func (csc *ClusterScopedCache) Synced() bool {
 	}
 
 	return true
+}
+
+func (csc *ClusterScopedCache) GvkHasInformer(infOpts InformerOptions) bool {
+	csc.mu.Lock()
+	defer csc.mu.Unlock()
+	_, ok := csc.GvkInformers[infOpts.Gvk]
+	return ok
 }
