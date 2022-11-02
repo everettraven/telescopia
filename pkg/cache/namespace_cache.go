@@ -12,12 +12,17 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// NamespaceScopedCache is a dynamic cache
+// with a focus on only tracking informers
+// with watches at a namespace level
 type NamespaceScopedCache struct {
 	Namespaces map[string]GvkToInformers
 	started    bool
 	mu         sync.Mutex
 }
 
+// NewNamespaceScopedCache will return a new
+// NamespaceScopedCache
 func NewNamespaceScopedCache() *NamespaceScopedCache {
 	return &NamespaceScopedCache{
 		Namespaces: make(map[string]GvkToInformers),
@@ -25,6 +30,13 @@ func NewNamespaceScopedCache() *NamespaceScopedCache {
 	}
 }
 
+// Get will attempt to get a Kubernetes resource from the cache for the
+// provided key and GVK. The general flow of this function is:
+// - If an informer doesn't exist that can facilitate finding a resource
+// based on the provided key & GVK an InformerNotFoundErr will be returned
+// - Every Informer for a Namespace-GVK pair will be queried.
+// -- If the requested resource is found it will be returned
+// -- If the requested resource is not found a NotFound error will be returned
 func (nsc *NamespaceScopedCache) Get(key types.NamespacedName, gvk schema.GroupVersionKind) (runtime.Object, error) {
 	nsc.mu.Lock()
 	defer nsc.mu.Unlock()
@@ -32,14 +44,17 @@ func (nsc *NamespaceScopedCache) Get(key types.NamespacedName, gvk schema.GroupV
 	var obj runtime.Object
 	var err error
 
+	// Check if any informers exist in the provided namespace
 	if _, ok := nsc.Namespaces[key.Namespace]; !ok {
 		return nil, NewInformerNotFoundErr(fmt.Errorf("no informers at the namespace level exist for namespace %q", key.Namespace))
 	}
 
+	// Check if any informers exist for the provided namespace-gvk pair
 	if _, ok := nsc.Namespaces[key.Namespace][gvk]; !ok {
 		return nil, NewInformerNotFoundErr(fmt.Errorf("no informers at the namespace level exist in namespace %q for GVK %q", key.Namespace, gvk))
 	}
 
+	// Loop through all informers and attempt to get the requested resource
 	for _, si := range nsc.Namespaces[key.Namespace][gvk] {
 		obj, err = si.Get(key.String())
 		if err != nil {
@@ -47,8 +62,11 @@ func (nsc *NamespaceScopedCache) Get(key types.NamespacedName, gvk schema.GroupV
 			continue
 		}
 		found = true
+		break
 	}
 
+	// If we found the requested resource, return it
+	// otherwise return a NotFound error
 	if found {
 		return obj, nil
 	} else {
@@ -56,6 +74,17 @@ func (nsc *NamespaceScopedCache) Get(key types.NamespacedName, gvk schema.GroupV
 	}
 }
 
+// List will attempt to get a list of Kubernetes resource from the cache for the
+// provided ListOptions and GVK. The general flow of this function is:
+// - If the provided ListOptions.Namespace != ""
+// -- If an informer doesn't exist that can facilitate finding a list of resources
+// based on the provided namespace & GVK an InformerNotFoundErr will be returned
+// -- Every Informer for a Namespace-GVK pair will be queried and the results
+// will be aggregated into a single list. Any errors encountered will be returned immediately.
+// - If the provided ListOptions.Namespace == ""
+// -- Every Namespace that has informers for the provided gvk will be queried and
+// the results will be aggregated into a single list. Any errors encountered will be returned immediately.
+// - The results will be deduplicated and returned.
 func (nsc *NamespaceScopedCache) List(listOpts client.ListOptions, gvk schema.GroupVersionKind) ([]runtime.Object, error) {
 	nsc.mu.Lock()
 	defer nsc.mu.Unlock()
@@ -108,24 +137,28 @@ func (nsc *NamespaceScopedCache) List(listOpts client.ListOptions, gvk schema.Gr
 	return deduplicatedList, nil
 }
 
+// AddInformer will add a new informer to the NamespaceScopedCache
+// based on the informer options provided. The general flow of this
+// function is:
+// - Create a new ScopeInformer
+// - Add the ScopeInformer to the cache based on the provided options
+// - Set the WatchErrorHandler on the ScopeInformer to forcefully remove
+// the ScopeInformer from the cache
+// - If the NamespaceScopedCache has been started, start the ScopeInformer
 func (nsc *NamespaceScopedCache) AddInformer(infOpts InformerOptions) {
 	nsc.mu.Lock()
 	defer nsc.mu.Unlock()
+
+	// Create the ScopeInformer
+	si := NewScopeInformer(infOpts.Informer)
+
+	// Add necessary mappings to the cache
 	if _, ok := nsc.Namespaces[infOpts.Namespace]; !ok {
 		nsc.Namespaces[infOpts.Namespace] = make(GvkToInformers)
 	}
 
 	if _, ok := nsc.Namespaces[infOpts.Namespace][infOpts.Gvk]; !ok {
 		nsc.Namespaces[infOpts.Namespace][infOpts.Gvk] = make(Informers)
-	}
-
-	si := NewScopeInformer(infOpts.Informer)
-	removeFromCache := func() {
-		nsc.RemoveInformer(infOpts)
-	}
-	si.SetWatchErrorHandler(WatchErrorHandlerForScopeInformer(si, removeFromCache))
-	if nsc.IsStarted() {
-		go si.Run()
 	}
 
 	if _, ok := nsc.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key]; !ok {
@@ -138,22 +171,59 @@ func (nsc *NamespaceScopedCache) AddInformer(infOpts InformerOptions) {
 		}
 	}
 
-}
+	// If permissions at any point don't allow this informer to run
+	// remove it from the cache so it doesn't stick around
+	removeFromCache := func() {
+		nsc.RemoveInformer(infOpts, true)
+	}
+	_ = si.SetWatchErrorHandler(WatchErrorHandlerForScopeInformer(si, removeFromCache))
 
-func (nsc *NamespaceScopedCache) RemoveInformer(infOpts InformerOptions) {
-	nsc.mu.Lock()
-	defer nsc.mu.Unlock()
-	// remove the dependent resource from the informer
-	si := nsc.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key]
-
-	si.RemoveDependent(infOpts.Dependent)
-
-	if len(si.GetDependents()) == 0 {
-		delete(nsc.Namespaces[infOpts.Namespace][infOpts.Gvk], infOpts.Key)
-		si.Terminate()
+	// if the cache is already started, start the ScopeInformer
+	if nsc.IsStarted() {
+		go si.Run()
 	}
 }
 
+// RemoveInformer will remove an informer from the NamespaceScopedCache
+// based on the informer options provided. The general flow of this
+// function is:
+// - Get the ScopeInformer based on the provided options
+// - Remove the provided Dependent from the ScopeInformer
+// - If there are no more dependents for the ScopeInformer OR the removal is
+// forced delete the informer from the cache and terminate it.
+// - If there are no more informers for the given Namespace-GVK pair,
+// remove it from the cache
+// - If there are no more informers for the given Namespace,
+// remove it from the cache
+func (nsc *NamespaceScopedCache) RemoveInformer(infOpts InformerOptions, force bool) {
+	nsc.mu.Lock()
+	defer nsc.mu.Unlock()
+
+	// Get the ScopeInformer based on the provided options
+	si := nsc.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key]
+
+	// Remove the dependent resource
+	si.RemoveDependent(infOpts.Dependent)
+
+	// if there are no more dependents or we are forcefully removing this informer
+	// then delete the ScopeInformer from the cache and terminate it.
+	if len(si.GetDependents()) == 0 || force {
+		delete(nsc.Namespaces[infOpts.Namespace][infOpts.Gvk], infOpts.Key)
+		si.Terminate()
+	}
+
+	// if there are no more informers for this gvk - remove it from the cache
+	if len(nsc.Namespaces[infOpts.Namespace][infOpts.Gvk]) == 0 {
+		delete(nsc.Namespaces[infOpts.Namespace], infOpts.Gvk)
+	}
+
+	// if there are no more informers for this namespace - remove it from the cache
+	if len(nsc.Namespaces[infOpts.Namespace]) == 0 {
+		delete(nsc.Namespaces, infOpts.Namespace)
+	}
+}
+
+// Start will start the cache and all it's informers
 func (nsc *NamespaceScopedCache) Start() {
 	nsc.mu.Lock()
 	defer nsc.mu.Unlock()
@@ -167,10 +237,12 @@ func (nsc *NamespaceScopedCache) Start() {
 	nsc.started = true
 }
 
+// IsStarted returns whether or not the cache has been started
 func (nsc *NamespaceScopedCache) IsStarted() bool {
 	return nsc.started
 }
 
+// Synced returns whether or not the cache has synced
 func (nsc *NamespaceScopedCache) Synced() bool {
 	nsc.mu.Lock()
 	defer nsc.mu.Unlock()
@@ -187,6 +259,8 @@ func (nsc *NamespaceScopedCache) Synced() bool {
 	return true
 }
 
+// GvkHasInformer returns whether or not an informer
+// exists in the cache for the provided InformerOptions
 func (nsc *NamespaceScopedCache) GvkHasInformer(infOpts InformerOptions) bool {
 	nsc.mu.Lock()
 	defer nsc.mu.Unlock()

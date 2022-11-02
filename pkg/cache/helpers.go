@@ -27,8 +27,6 @@ import (
 // --------------------------------
 var defaultResyncTime = 10 * time.Hour
 
-var globalCache = "__cluster-cache"
-
 func defaultOpts(config *rest.Config, opts cache.Options) (cache.Options, error) {
 	// Use the default Kubernetes Scheme if unset
 	if opts.Scheme == nil {

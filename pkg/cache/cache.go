@@ -7,11 +7,13 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
@@ -22,8 +24,6 @@ import (
 
 // ScopeInformerFactory is a function that is used to create a
 // informers.GenericInformer for the provided GVR and SharedInformerOptions.
-// It is up to the function to properly implement any error
-// handling logic for the informer losing permissions.
 type ScopeInformerFactory func(gvr schema.GroupVersionResource, options ...informers.SharedInformerOption) (informers.GenericInformer, error)
 
 // ScopedCache is a wrapper around the
@@ -54,6 +54,11 @@ type ScopedCache struct {
 	// one needs to be created by the
 	// ScopedCache.
 	scopeInformerFactory ScopeInformerFactory
+
+	// cli is used to create SSARs to
+	// check whether or not a request is
+	// permitted before submitting it
+	cli dynamic.Interface
 }
 
 // ScopedCacheOption is a function to set values on the ScopedCache
@@ -68,6 +73,10 @@ func WithScopedInformerFactory(sif ScopeInformerFactory) ScopedCacheOption {
 	}
 }
 
+// ScopeCacheBuilder is a builder function that
+// can be used to return a controller-runtime
+// cache.NewCacheFunc. This function enables controller-runtime
+// to properly create a new ScopedCache
 func ScopedCacheBuilder(scOpts ...ScopedCacheOption) crcache.NewCacheFunc {
 	return func(config *rest.Config, opts crcache.Options) (crcache.Cache, error) {
 		opts, err := defaultOpts(config, opts)
@@ -78,7 +87,9 @@ func ScopedCacheBuilder(scOpts ...ScopedCacheOption) crcache.NewCacheFunc {
 		namespacedCache := NewNamespaceScopedCache()
 		clusterCache := NewClusterScopedCache()
 
-		sc := &ScopedCache{nsCache: namespacedCache, Scheme: opts.Scheme, RESTMapper: opts.Mapper, clusterCache: clusterCache}
+		cli := dynamic.NewForConfigOrDie(config)
+
+		sc := &ScopedCache{nsCache: namespacedCache, Scheme: opts.Scheme, RESTMapper: opts.Mapper, clusterCache: clusterCache, cli: cli}
 		for _, opt := range scOpts {
 			opt(sc)
 		}
@@ -90,26 +101,75 @@ func ScopedCacheBuilder(scOpts ...ScopedCacheOption) crcache.NewCacheFunc {
 // client.Reader implementation
 // ----------------------
 
-// TODO: Figure out how to handle the case where an informer does not exist and one needs to be created.
-// TODO: Should we create SSAR requests to determine whether or not the operator has the proper permissions?
+// Get will attempt to get the requested resource from the appropriate cache.
+// The general flow for this function is:
+// - Get the GVK for the provided object
+// - Check if the proper permissions exist to perform this request
+// - Get the requested resource from the appropriate cache, returning any errors
+// -- If the request is not permitted:
+// --- Any informers that meet the invalid permissions are forcefully removed from the cache
+// --- A Forbidden error is returned
+// TODO: Should we automatically create the informer if one is not found?
 func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client.Object) error {
 	var fetchObj runtime.Object
 
 	// obj could have an empty GVK, lets make sure we have a proper gvk
 	gvk, err := apiutil.GVKForObject(obj, sc.Scheme)
 	if err != nil {
-		return fmt.Errorf("encountered an error getting GVK for object: %w", err)
+		return fmt.Errorf("getting GVK for object: %w", err)
+	}
+
+	// Check if the request is permitted
+	mapping, err := sc.RESTMapper.RESTMapping(gvk.GroupKind())
+	if err != nil {
+		return err
+	}
+
+	permitted, err := canVerbResource(sc.cli, mapping.Resource, "get", key.Namespace)
+	if err != nil {
+		return fmt.Errorf("checking \"get\" permissions for resource: %w", err)
 	}
 
 	_, gvkClusterScoped := sc.clusterCache.GvkInformers[gvk]
 
-	// TODO: This isn't a valid check but is in place temporarily for testing. FIX THIS!!!!
 	if gvkClusterScoped {
+		// Return permission denied error if request is not permitted
+		if !permitted {
+			// remove the informers in the cluster cache
+			for infKey := range sc.clusterCache.GvkInformers[gvk] {
+				infOpt := InformerOptions{
+					Gvk:       gvk,
+					Key:       infKey,
+					Dependent: &corev1.Namespace{},
+				}
+
+				// forcefully remove because permissions no longer exist
+				sc.RemoveInformer(infOpt, true)
+			}
+			return errors.NewForbidden(mapping.Resource.GroupResource(), "", fmt.Errorf("not permitted"))
+		}
+
 		fetchObj, err = sc.clusterCache.Get(key, gvk)
 		if err != nil {
 			return err
 		}
 	} else {
+		// Return permission denied error if request is not permitted
+		if !permitted {
+			// remove the informers in the cluster cache
+			for infKey := range sc.nsCache.Namespaces[key.Namespace][gvk] {
+				infOpt := InformerOptions{
+					Namespace: key.Namespace,
+					Gvk:       gvk,
+					Key:       infKey,
+					Dependent: &corev1.Namespace{},
+				}
+				// forcefully remove because permissions no longer exist
+				sc.RemoveInformer(infOpt, true)
+			}
+			return errors.NewForbidden(mapping.Resource.GroupResource(), "", fmt.Errorf("not permitted"))
+		}
+
 		fetchObj, err = sc.nsCache.Get(key, gvk)
 		if err != nil {
 			return err
@@ -126,7 +186,14 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 	return nil
 }
 
-// TODO: Figure out how to handle the case where an informer does not exist and one needs to be created.
+// List will attempt to get the requested list of resources from the appropriate cache.
+// The general flow for this function is:
+// - Get the GVK
+// - Check if the proper permissions exist to perform this request
+// - Get the requested resource list from the appropriate cache, returning any errors
+// -- If the request is not permitted:
+// --- Any informers that meet the invalid permissions are forcefully removed from the cache
+// --- A Forbidden error is returned
 func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ...client.ListOption) error {
 	listOpts := client.ListOptions{}
 	listOpts.ApplyOptions(opts)
@@ -145,6 +212,17 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 		Kind:    strings.TrimSuffix(gvk.Kind, "List"),
 	}
 
+	// Check if the request is permitted
+	mapping, err := sc.RESTMapper.RESTMapping(gvkForListItems.GroupKind())
+	if err != nil {
+		return err
+	}
+
+	permitted, err := canVerbResource(sc.cli, mapping.Resource, "list", listOpts.Namespace)
+	if err != nil {
+		return fmt.Errorf("checking \"list\" permissions for resource: %w", err)
+	}
+
 	_, gvkClusterScoped := sc.clusterCache.GvkInformers[gvkForListItems]
 
 	allItems, err := apimeta.ExtractList(list)
@@ -153,12 +231,43 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 	}
 
 	if gvkClusterScoped {
+		// Return permission denied error if request is not permitted
+		if !permitted {
+			// remove the informers in the cluster cache
+			for key := range sc.clusterCache.GvkInformers[gvk] {
+				infOpt := InformerOptions{
+					Gvk:       gvk,
+					Key:       key,
+					Dependent: &corev1.Namespace{},
+				}
+
+				// forcefully remove because permissions no longer exist
+				sc.RemoveInformer(infOpt, true)
+			}
+			return errors.NewForbidden(mapping.Resource.GroupResource(), "", fmt.Errorf("not permitted"))
+		}
 		// Look at the global cache to get the objects with the specified GVK
 		objs, err = sc.clusterCache.List(listOpts, gvkForListItems)
 		if err != nil {
 			return err
 		}
 	} else {
+		// Return permission denied error if request is not permitted
+		if !permitted {
+			// remove the informers in the cluster cache
+			for key := range sc.nsCache.Namespaces[listOpts.Namespace][gvk] {
+				infOpt := InformerOptions{
+					Namespace: listOpts.Namespace,
+					Gvk:       gvk,
+					Key:       key,
+					Dependent: &corev1.Namespace{},
+				}
+
+				// forcefully remove because permissions no longer exist
+				sc.RemoveInformer(infOpt, true)
+			}
+			return errors.NewForbidden(mapping.Resource.GroupResource(), "", fmt.Errorf("not permitted"))
+		}
 		objs, err = sc.nsCache.List(listOpts, gvkForListItems)
 		if err != nil {
 			return err
@@ -166,11 +275,6 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 	}
 
 	allItems = append(allItems, objs...)
-
-	allItems, err = deduplicateList(allItems)
-	if err != nil {
-		return fmt.Errorf("encountered an error attempting to list: %w", err)
-	}
 
 	return apimeta.SetList(list, allItems)
 }
@@ -202,9 +306,25 @@ func deduplicateList(objs []runtime.Object) ([]runtime.Object, error) {
 // cache.Informers implementation
 // ----------------------
 
+// GetInformer will attempt to get an informer for the provided object
+// and add it to the cache. The general flow for this function is:
+// - Get the GVK
+// - Create InformerOptions
+// - If the provided object has a Namespace value != "":
+// -- If an informer doesn't already exist in the namespace cache:
+// --- Generate a new informer scoped to the namespace
+// --- Add the informer to the cache
+// --- Return the new ScopeInformer
+// -- If the informer already exists in the namespace cache:
+// --- Return the existing ScopeInformer
+// - If the provided object has a Namespace value == "":
+// -- If an informer doesn't already exist in the cluster cache:
+// --- Generate a new informer scoped to the cluster
+// --- Add the informer to the cache
+// --- Return the new ScopeInformer
+// -- If the informer already exists in the cluster cache:
+// --- Return the existing ScopeInformer
 func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (crcache.Informer, error) {
-	fmt.Println("XXX ScopedCache.GetInformer()")
-
 	// obj could have an empty GVK, lets make sure we have a proper gvk
 	gvk, err := apiutil.GVKForObject(obj, sc.Scheme)
 	if err != nil {
@@ -226,11 +346,9 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (crca
 	var inf informers.GenericInformer
 
 	if obj.GetNamespace() != corev1.NamespaceAll {
-		fmt.Println("XXX ScopedCache.GetInformer() -- Namespaced!")
 		infOpts.Namespace = obj.GetNamespace()
 
 		if si, ok := sc.nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key]; !ok {
-			fmt.Println("XXX ScopedCache.GetInformer() -- Adding informer to namespace:", infOpts.Namespace)
 			inf, err = sc.scopeInformerFactory(mapping.Resource, informers.WithNamespace(obj.GetNamespace()))
 			if err != nil {
 				return nil, err
@@ -240,13 +358,10 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (crca
 			sc.AddInformer(infOpts)
 			return sc.nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key], nil
 		} else {
-			fmt.Println("XXX ScopedCache.GetInformer() -- Informer already exists, returning it")
 			return si, nil
 		}
 	} else {
-		fmt.Println("XXX ScopedCache.GetInformer() -- Clustered!")
 		if si, ok := sc.clusterCache.GvkInformers[infOpts.Gvk][infOpts.Key]; !ok {
-			fmt.Println("XXX ScopedCache.GetInformer() -- Adding informer to cluster cache")
 			inf, err = sc.scopeInformerFactory(mapping.Resource)
 			if err != nil {
 				return nil, err
@@ -256,37 +371,49 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (crca
 			sc.AddInformer(infOpts)
 			return sc.clusterCache.GvkInformers[infOpts.Gvk][infOpts.Key], nil
 		} else {
-			fmt.Println("XXX ScopedCache.GetInformer() -- Informer already exists, returning it")
 			return si, nil
 		}
 	}
 }
 
+// GetInformerForKind will attempt to get an informer for the provided GVK
+// and add it to the cache. The general flow for this function is:
+// - Get the GVK
+// - Create InformerOptions:
+// - If an informer doesn't already exist in the cluster cache:
+// -- Generate a new informer scoped to the cluster
+// -- Add the informer to the cache
+// -- Return the new ScopeInformer
+// - If the informer already exists in the cluster cache:
+// -- Return the existing ScopeInformer
 func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupVersionKind) (crcache.Informer, error) {
 	mapping, err := sc.RESTMapper.RESTMapping(gvk.GroupKind())
 	if err != nil {
 		return nil, err
 	}
 
-	// TODO: Figure out the best way to add the created informer to the cache
-	// Question - Does this only ever get called for cluster scoped?
-	// create the informer options
 	infOpts := InformerOptions{
 		Gvk:       gvk,
 		Key:       fmt.Sprintf("scopedcache-getinformer-%s", hashObject(gvk)),
 		Dependent: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{UID: types.UID(hashObject(gvk))}},
 	}
 
-	inf, err := sc.scopeInformerFactory(mapping.Resource)
-	if err != nil {
-		return nil, err
-	}
-	infOpts.Informer = inf
+	if si, ok := sc.clusterCache.GvkInformers[infOpts.Gvk][infOpts.Key]; !ok {
+		inf, err := sc.scopeInformerFactory(mapping.Resource)
+		if err != nil {
+			return nil, err
+		}
 
-	sc.AddInformer(infOpts)
-	return inf.Informer(), nil
+		infOpts.Informer = inf
+		sc.AddInformer(infOpts)
+		return sc.clusterCache.GvkInformers[infOpts.Gvk][infOpts.Key], nil
+	} else {
+		return si, nil
+	}
 }
 
+// Start will start the ScopedCache. This involves starting both
+// the ClusterScopedCache and NamespaceScopedCache and all their informers
 func (sc *ScopedCache) Start(ctx context.Context) error {
 	sc.clusterCache.Start()
 	sc.nsCache.Start()
@@ -296,6 +423,7 @@ func (sc *ScopedCache) Start(ctx context.Context) error {
 	return nil
 }
 
+// WaitForCacheSync will block until all the caches have been synced
 func (sc *ScopedCache) WaitForCacheSync(ctx context.Context) bool {
 	synced := false
 	for {
@@ -309,6 +437,14 @@ func (sc *ScopedCache) WaitForCacheSync(ctx context.Context) bool {
 	return synced
 }
 
+// IndexField will add an index field to the appropriate informers
+// The general flow of this function is:
+// - Get the GVK
+// - Create an Indexer to add to the ScopeInformers
+// - If the object has a Namespace value != "":
+// -- Add the indexer to all informers in the namespace cache for the Namespace-GVK pair
+// - If the object has a Namespace value == "":
+// -- Add the indexer to all informers in the cluster cache for the GVK
 func (sc *ScopedCache) IndexField(ctx context.Context, obj client.Object, field string, extractValue client.IndexerFunc) error {
 	// obj could have an empty GVK, lets make sure we have a proper gvk
 	gvk, err := apiutil.GVKForObject(obj, sc.Scheme)
@@ -350,6 +486,8 @@ func (sc *ScopedCache) IndexField(ctx context.Context, obj client.Object, field 
 
 // Custom functions for ScopedCache
 
+// AddInformer will add an informer to the appropriate
+// cache based on the informer options provided.
 func (sc *ScopedCache) AddInformer(infOpts InformerOptions) {
 	if infOpts.Namespace != "" {
 		sc.nsCache.AddInformer(infOpts)
@@ -358,14 +496,18 @@ func (sc *ScopedCache) AddInformer(infOpts InformerOptions) {
 	}
 }
 
-func (sc *ScopedCache) RemoveInformer(infOpts InformerOptions) {
+// RemoveInformer will remove an informer from the appropriate
+// cache based on the informer options provided.
+func (sc *ScopedCache) RemoveInformer(infOpts InformerOptions, force bool) {
 	if infOpts.Namespace != "" {
-		sc.nsCache.RemoveInformer(infOpts)
+		sc.nsCache.RemoveInformer(infOpts, force)
 	} else {
-		sc.clusterCache.RemoveInformer(infOpts)
+		sc.clusterCache.RemoveInformer(infOpts, force)
 	}
 }
 
+// GvkHasInformer returns whether or not an informer
+// exists in the cache for the provided InformerOptions
 func (sc *ScopedCache) GvkHasInformer(infOpts InformerOptions) bool {
 	if infOpts.Namespace != "" {
 		return sc.nsCache.GvkHasInformer(infOpts)
