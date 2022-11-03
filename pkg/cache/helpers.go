@@ -158,7 +158,7 @@ func canListWatchResourceForNamespace(cli dynamic.Interface, gvr schema.GroupVer
 }
 
 // HashObject calculates a hash from an object
-func hashObject(obj interface{}) string {
+func HashObject(obj interface{}) string {
 	hasher := fnv.New32a()
 	deepHashObject(hasher, &obj)
 	return rand.SafeEncodeString(fmt.Sprint(hasher.Sum32()))

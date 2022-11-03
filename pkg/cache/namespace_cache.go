@@ -200,7 +200,10 @@ func (nsc *NamespaceScopedCache) RemoveInformer(infOpts InformerOptions, force b
 	defer nsc.mu.Unlock()
 
 	// Get the ScopeInformer based on the provided options
-	si := nsc.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key]
+	si, ok := nsc.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key]
+	if !ok {
+		return
+	}
 
 	// Remove the dependent resource
 	si.RemoveDependent(infOpts.Dependent)
@@ -261,13 +264,15 @@ func (nsc *NamespaceScopedCache) Synced() bool {
 
 // GvkHasInformer returns whether or not an informer
 // exists in the cache for the provided InformerOptions
-func (nsc *NamespaceScopedCache) GvkHasInformer(infOpts InformerOptions) bool {
+func (nsc *NamespaceScopedCache) HasInformer(infOpts InformerOptions) bool {
 	nsc.mu.Lock()
 	defer nsc.mu.Unlock()
 	has := false
 	if _, nsOk := nsc.Namespaces[infOpts.Namespace]; nsOk {
 		if _, gvkOk := nsc.Namespaces[infOpts.Namespace][infOpts.Gvk]; gvkOk {
-			has = true
+			if _, kOk := nsc.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key]; kOk {
+				has = true
+			}
 		}
 	}
 

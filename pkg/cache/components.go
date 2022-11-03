@@ -113,7 +113,7 @@ func (si *ScopeInformer) List(listOpts client.ListOptions) ([]runtime.Object, er
 // AddEventHandler will add an event handler
 // to the ScopeInformer
 func (si *ScopeInformer) AddEventHandler(handler cache.ResourceEventHandler) {
-	key := fmt.Sprintf("scopeinformer-addeventhandler-%s", hashObject(handler))
+	key := fmt.Sprintf("scopeinformer-addeventhandler-%s", HashObject(handler))
 	// only add the event listener if it hasn't already been added to this informer
 	if _, ok := si.eventListeners[key]; !ok {
 		si.eventListeners[key] = handler
@@ -124,7 +124,7 @@ func (si *ScopeInformer) AddEventHandler(handler cache.ResourceEventHandler) {
 // AddEventHandlerWithResyncPeriod will add an event handler
 // with a specific resync period to the ScopeInformer
 func (si *ScopeInformer) AddEventHandlerWithResyncPeriod(handler cache.ResourceEventHandler, resyncPeriod time.Duration) {
-	key := fmt.Sprintf("scopeinformer-addeventhandlerwithresyncperiod-%s", hashObject(handler))
+	key := fmt.Sprintf("scopeinformer-addeventhandlerwithresyncperiod-%s", HashObject(handler))
 	// only add the event listener if it hasn't already been added to this informer
 	if _, ok := si.eventListeners[key]; !ok {
 		si.eventListeners[key] = handler
@@ -196,6 +196,35 @@ func (infe *InformerNotFoundErr) Error() string {
 // provided error is of type InformerNotFoundError
 func IsInformerNotFoundErr(err error) bool {
 	_, ok := err.(*InformerNotFoundErr)
+	return ok
+}
+
+// CacheNotFoundErr is an error to
+// represent that an object was not
+// found by the cache. This could mean
+// that an informer has not been created
+// that would find the requested resource
+type CacheNotFoundErr struct {
+	Err error
+}
+
+// NewCacheNotFoundErr creates a new CacheNotFoundErr
+// for the provided error
+func NewCacheNotFoundErr(err error) *CacheNotFoundErr {
+	return &CacheNotFoundErr{
+		Err: err,
+	}
+}
+
+// Error returns the string representation of the error
+func (cnfe *CacheNotFoundErr) Error() string {
+	return cnfe.Err.Error()
+}
+
+// IsCacheNotFoundErr checks whether or not the
+// provided error is of type CacheNotFoundErr
+func IsCacheNotFoundErr(err error) bool {
+	_, ok := err.(*CacheNotFoundErr)
 	return ok
 }
 

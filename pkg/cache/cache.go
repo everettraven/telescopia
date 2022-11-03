@@ -10,6 +10,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -136,16 +137,18 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 		// Return permission denied error if request is not permitted
 		if !permitted {
 			// remove the informers in the cluster cache
-			for infKey := range sc.clusterCache.GvkInformers[gvk] {
-				infOpt := InformerOptions{
-					Gvk:       gvk,
-					Key:       infKey,
-					Dependent: &corev1.Namespace{},
-				}
+			// TODO: Should we do this? If we remove the cluster scoped informers
+			// they may not be as easily recreated
+			// for infKey := range sc.clusterCache.GvkInformers[gvk] {
+			// 	infOpt := InformerOptions{
+			// 		Gvk:       gvk,
+			// 		Key:       infKey,
+			// 		Dependent: &corev1.Namespace{},
+			// 	}
 
-				// forcefully remove because permissions no longer exist
-				sc.RemoveInformer(infOpt, true)
-			}
+			// 	// forcefully remove because permissions no longer exist
+			// 	sc.RemoveInformer(infOpt, true)
+			// }
 			return errors.NewForbidden(mapping.Resource.GroupResource(), "", fmt.Errorf("not permitted"))
 		}
 
@@ -233,17 +236,19 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 	if gvkClusterScoped {
 		// Return permission denied error if request is not permitted
 		if !permitted {
-			// remove the informers in the cluster cache
-			for key := range sc.clusterCache.GvkInformers[gvk] {
-				infOpt := InformerOptions{
-					Gvk:       gvk,
-					Key:       key,
-					Dependent: &corev1.Namespace{},
-				}
+			// 	// remove the informers in the cluster cache
+			// // TODO: Should we do this? If we remove the cluster scoped informers
+			// // they may not be as easily recreated
+			// 	for key := range sc.clusterCache.GvkInformers[gvk] {
+			// 		infOpt := InformerOptions{
+			// 			Gvk:       gvk,
+			// 			Key:       key,
+			// 			Dependent: &corev1.Namespace{},
+			// 		}
 
-				// forcefully remove because permissions no longer exist
-				sc.RemoveInformer(infOpt, true)
-			}
+			// 		// forcefully remove because permissions no longer exist
+			// 		sc.RemoveInformer(infOpt, true)
+			// 	}
 			return errors.NewForbidden(mapping.Resource.GroupResource(), "", fmt.Errorf("not permitted"))
 		}
 		// Look at the global cache to get the objects with the specified GVK
@@ -338,18 +343,32 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (crca
 
 	// create the informer options
 	infOpts := InformerOptions{
-		Gvk:       gvk,
-		Key:       fmt.Sprintf("scopedcache-getinformer-%s", hashObject(obj)),
-		Dependent: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{UID: types.UID(hashObject(obj))}},
+		Gvk: gvk,
+		Key: fmt.Sprintf("scopedcache-getinformer-%s", HashObject(obj)),
+		// TODO: We should probably create our own type that implements the
+		// controller-runtime client.Object interface to use instead of an
+		// arbitrary type (like Namespace in this case)
+		Dependent: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{UID: types.UID(HashObject(obj))}},
 	}
 
 	var inf informers.GenericInformer
 
+	sharedInfOpts := []informers.SharedInformerOption{}
+
+	// if there are any labels, create informer with specific label selector
+	if len(obj.GetLabels()) != 0 {
+		selector := labels.SelectorFromSet(obj.GetLabels())
+		sharedInfOpts = append(sharedInfOpts, informers.WithTweakListOptions(func(lo *metav1.ListOptions) {
+			lo.LabelSelector = selector.String()
+		}))
+	}
+
 	if obj.GetNamespace() != corev1.NamespaceAll {
+		sharedInfOpts = append(sharedInfOpts, informers.WithNamespace(obj.GetNamespace()))
 		infOpts.Namespace = obj.GetNamespace()
 
 		if si, ok := sc.nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key]; !ok {
-			inf, err = sc.scopeInformerFactory(mapping.Resource, informers.WithNamespace(obj.GetNamespace()))
+			inf, err = sc.scopeInformerFactory(mapping.Resource, sharedInfOpts...)
 			if err != nil {
 				return nil, err
 			}
@@ -362,7 +381,7 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (crca
 		}
 	} else {
 		if si, ok := sc.clusterCache.GvkInformers[infOpts.Gvk][infOpts.Key]; !ok {
-			inf, err = sc.scopeInformerFactory(mapping.Resource)
+			inf, err = sc.scopeInformerFactory(mapping.Resource, sharedInfOpts...)
 			if err != nil {
 				return nil, err
 			}
@@ -394,8 +413,8 @@ func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupV
 
 	infOpts := InformerOptions{
 		Gvk:       gvk,
-		Key:       fmt.Sprintf("scopedcache-getinformer-%s", hashObject(gvk)),
-		Dependent: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{UID: types.UID(hashObject(gvk))}},
+		Key:       fmt.Sprintf("scopedcache-getinformer-%s", HashObject(gvk)),
+		Dependent: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{UID: types.UID(HashObject(gvk))}},
 	}
 
 	if si, ok := sc.clusterCache.GvkInformers[infOpts.Gvk][infOpts.Key]; !ok {
@@ -508,12 +527,49 @@ func (sc *ScopedCache) RemoveInformer(infOpts InformerOptions, force bool) {
 
 // GvkHasInformer returns whether or not an informer
 // exists in the cache for the provided InformerOptions
-func (sc *ScopedCache) GvkHasInformer(infOpts InformerOptions) bool {
+func (sc *ScopedCache) HasInformer(infOpts InformerOptions) bool {
 	if infOpts.Namespace != "" {
-		return sc.nsCache.GvkHasInformer(infOpts)
+		return sc.nsCache.HasInformer(infOpts)
 	} else {
-		return sc.clusterCache.GvkHasInformer(infOpts)
+		return sc.clusterCache.HasInformer(infOpts)
 	}
+}
+
+// PrintCache is a temporary function to help show the state of the
+// cache by printing it out.
+func (sc *ScopedCache) PrintCache() {
+	fmt.Println("")
+	fmt.Println("")
+	fmt.Println("# ScopedCache State")
+	fmt.Println("------------------------------------------------")
+	fmt.Println("")
+	fmt.Println("## ScopedCache Cluster Cache State")
+	for gvk := range sc.clusterCache.GvkInformers {
+		infKeys := []string{}
+		for infKey := range sc.clusterCache.GvkInformers[gvk] {
+			infKeys = append(infKeys, infKey)
+		}
+
+		fmt.Println(fmt.Sprintf("\t%s --> %s", gvk, infKeys))
+	}
+
+	fmt.Println("")
+	fmt.Println("## ScopedCache Namespace Cache State")
+	for ns := range sc.nsCache.Namespaces {
+		fmt.Println(fmt.Sprintf("\tNamespace %q", ns))
+		for gvk := range sc.nsCache.Namespaces[ns] {
+			infKeys := []string{}
+			for infKey := range sc.nsCache.Namespaces[ns][gvk] {
+				infKeys = append(infKeys, infKey)
+			}
+
+			fmt.Println(fmt.Sprintf("\t\t%s --> %s", gvk, infKeys))
+		}
+	}
+	fmt.Println("")
+	fmt.Println("------------------------------------------------")
+	fmt.Println("")
+	fmt.Println("")
 }
 
 // --------------------------------

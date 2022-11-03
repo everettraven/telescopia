@@ -133,10 +133,12 @@ func (csc *ClusterScopedCache) AddInformer(infOpts InformerOptions) {
 
 	// If permissions at any point don't allow this informer to run
 	// remove it from the cache so it doesn't stick around
-	removeFromCache := func() {
-		csc.RemoveInformer(infOpts, true)
-	}
-	_ = si.SetWatchErrorHandler(WatchErrorHandlerForScopeInformer(si, removeFromCache))
+	// TODO: Should we do this? If we remove the cluster scoped informers
+	// they may not be as easily recreated
+	// removeFromCache := func() {
+	// 	csc.RemoveInformer(infOpts, true)
+	// }
+	// _ = si.SetWatchErrorHandler(WatchErrorHandlerForScopeInformer(si, removeFromCache))
 
 	// if the cache is already started, start the ScopeInformer
 	if csc.IsStarted() {
@@ -158,8 +160,10 @@ func (csc *ClusterScopedCache) RemoveInformer(infOpts InformerOptions, force boo
 	defer csc.mu.Unlock()
 
 	// Get the ScopeInformer based on the provided options
-	si := csc.GvkInformers[infOpts.Gvk][infOpts.Key]
-
+	si, ok := csc.GvkInformers[infOpts.Gvk][infOpts.Key]
+	if !ok {
+		return
+	}
 	// Remove the dependent resource
 	si.RemoveDependent(infOpts.Dependent)
 
@@ -211,9 +215,14 @@ func (csc *ClusterScopedCache) Synced() bool {
 
 // GvkHasInformer returns whether or not an informer
 // exists in the cache for the provided InformerOptions
-func (csc *ClusterScopedCache) GvkHasInformer(infOpts InformerOptions) bool {
+func (csc *ClusterScopedCache) HasInformer(infOpts InformerOptions) bool {
 	csc.mu.Lock()
 	defer csc.mu.Unlock()
-	_, ok := csc.GvkInformers[infOpts.Gvk]
-	return ok
+	has := false
+	if _, ok := csc.GvkInformers[infOpts.Gvk]; ok {
+		if _, kOk := csc.GvkInformers[infOpts.Gvk][infOpts.Key]; kOk {
+			has = true
+		}
+	}
+	return has
 }
