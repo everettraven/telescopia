@@ -1,10 +1,13 @@
-package cache
+package namespace
 
 import (
 	"fmt"
 	"strings"
 	"sync"
 
+	"github.com/everettraven/telescopia/pkg/cache/components"
+	cacherrs "github.com/everettraven/telescopia/pkg/cache/errors"
+	"github.com/everettraven/telescopia/pkg/cache/util"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -16,7 +19,7 @@ import (
 // with a focus on only tracking informers
 // with watches at a namespace level
 type NamespaceScopedCache struct {
-	Namespaces map[string]GvkToInformers
+	Namespaces map[string]components.GvkToInformers
 	started    bool
 	mu         sync.Mutex
 }
@@ -25,7 +28,7 @@ type NamespaceScopedCache struct {
 // NamespaceScopedCache
 func NewNamespaceScopedCache() *NamespaceScopedCache {
 	return &NamespaceScopedCache{
-		Namespaces: make(map[string]GvkToInformers),
+		Namespaces: make(map[string]components.GvkToInformers),
 		started:    false,
 	}
 }
@@ -46,12 +49,12 @@ func (nsc *NamespaceScopedCache) Get(key types.NamespacedName, gvk schema.GroupV
 
 	// Check if any informers exist in the provided namespace
 	if _, ok := nsc.Namespaces[key.Namespace]; !ok {
-		return nil, NewInformerNotFoundErr(fmt.Errorf("no informers at the namespace level exist for namespace %q", key.Namespace))
+		return nil, cacherrs.NewInformerNotFoundErr(fmt.Errorf("no informers at the namespace level exist for namespace %q", key.Namespace))
 	}
 
 	// Check if any informers exist for the provided namespace-gvk pair
 	if _, ok := nsc.Namespaces[key.Namespace][gvk]; !ok {
-		return nil, NewInformerNotFoundErr(fmt.Errorf("no informers at the namespace level exist in namespace %q for GVK %q", key.Namespace, gvk))
+		return nil, cacherrs.NewInformerNotFoundErr(fmt.Errorf("no informers at the namespace level exist in namespace %q for GVK %q", key.Namespace, gvk))
 	}
 
 	// Loop through all informers and attempt to get the requested resource
@@ -91,11 +94,11 @@ func (nsc *NamespaceScopedCache) List(listOpts client.ListOptions, gvk schema.Gr
 	retList := []runtime.Object{}
 	if listOpts.Namespace != "" {
 		if _, ok := nsc.Namespaces[listOpts.Namespace]; !ok {
-			return nil, NewInformerNotFoundErr(fmt.Errorf("no informers at the namespace level exist for namespace %q", listOpts.Namespace))
+			return nil, cacherrs.NewInformerNotFoundErr(fmt.Errorf("no informers at the namespace level exist for namespace %q", listOpts.Namespace))
 		}
 
 		if _, ok := nsc.Namespaces[listOpts.Namespace][gvk]; !ok {
-			return nil, NewInformerNotFoundErr(fmt.Errorf("no informers at the namespace level exist in namespace %q for GVK %q", listOpts.Namespace, gvk))
+			return nil, cacherrs.NewInformerNotFoundErr(fmt.Errorf("no informers at the namespace level exist in namespace %q for GVK %q", listOpts.Namespace, gvk))
 		}
 
 		for _, si := range nsc.Namespaces[listOpts.Namespace][gvk] {
@@ -129,7 +132,7 @@ func (nsc *NamespaceScopedCache) List(listOpts client.ListOptions, gvk schema.Gr
 		}
 	}
 
-	deduplicatedList, err := deduplicateList(retList)
+	deduplicatedList, err := util.DeduplicateList(retList)
 	if err != nil {
 		return nil, err
 	}
@@ -145,20 +148,20 @@ func (nsc *NamespaceScopedCache) List(listOpts client.ListOptions, gvk schema.Gr
 // - Set the WatchErrorHandler on the ScopeInformer to forcefully remove
 // the ScopeInformer from the cache
 // - If the NamespaceScopedCache has been started, start the ScopeInformer
-func (nsc *NamespaceScopedCache) AddInformer(infOpts InformerOptions) {
+func (nsc *NamespaceScopedCache) AddInformer(infOpts components.InformerOptions) {
 	nsc.mu.Lock()
 	defer nsc.mu.Unlock()
 
 	// Create the ScopeInformer
-	si := NewScopeInformer(infOpts.Informer)
+	si := components.NewScopeInformer(infOpts.Informer)
 
 	// Add necessary mappings to the cache
 	if _, ok := nsc.Namespaces[infOpts.Namespace]; !ok {
-		nsc.Namespaces[infOpts.Namespace] = make(GvkToInformers)
+		nsc.Namespaces[infOpts.Namespace] = make(components.GvkToInformers)
 	}
 
 	if _, ok := nsc.Namespaces[infOpts.Namespace][infOpts.Gvk]; !ok {
-		nsc.Namespaces[infOpts.Namespace][infOpts.Gvk] = make(Informers)
+		nsc.Namespaces[infOpts.Namespace][infOpts.Gvk] = make(components.Informers)
 	}
 
 	if _, ok := nsc.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key]; !ok {
@@ -176,7 +179,7 @@ func (nsc *NamespaceScopedCache) AddInformer(infOpts InformerOptions) {
 	removeFromCache := func() {
 		nsc.RemoveInformer(infOpts, true)
 	}
-	_ = si.SetWatchErrorHandler(WatchErrorHandlerForScopeInformer(si, removeFromCache))
+	_ = si.SetWatchErrorHandler(components.WatchErrorHandlerForScopeInformer(si, removeFromCache))
 
 	// if the cache is already started, start the ScopeInformer
 	if nsc.IsStarted() {
@@ -195,7 +198,7 @@ func (nsc *NamespaceScopedCache) AddInformer(infOpts InformerOptions) {
 // remove it from the cache
 // - If there are no more informers for the given Namespace,
 // remove it from the cache
-func (nsc *NamespaceScopedCache) RemoveInformer(infOpts InformerOptions, force bool) {
+func (nsc *NamespaceScopedCache) RemoveInformer(infOpts components.InformerOptions, force bool) {
 	nsc.mu.Lock()
 	defer nsc.mu.Unlock()
 
@@ -263,8 +266,8 @@ func (nsc *NamespaceScopedCache) Synced() bool {
 }
 
 // GvkHasInformer returns whether or not an informer
-// exists in the cache for the provided InformerOptions
-func (nsc *NamespaceScopedCache) HasInformer(infOpts InformerOptions) bool {
+// exists in the cache for the provided components.InformerOptions
+func (nsc *NamespaceScopedCache) HasInformer(infOpts components.InformerOptions) bool {
 	nsc.mu.Lock()
 	defer nsc.mu.Unlock()
 	has := false

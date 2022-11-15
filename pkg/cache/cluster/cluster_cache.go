@@ -1,9 +1,12 @@
-package cache
+package cluster
 
 import (
 	"fmt"
 	"sync"
 
+	"github.com/everettraven/telescopia/pkg/cache/components"
+	"github.com/everettraven/telescopia/pkg/cache/errors"
+	"github.com/everettraven/telescopia/pkg/cache/util"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -14,7 +17,7 @@ import (
 // with a focus on only tracking informers
 // with watches at a cluster level
 type ClusterScopedCache struct {
-	GvkInformers GvkToInformers
+	GvkInformers components.GvkToInformers
 	started      bool
 	mu           sync.Mutex
 }
@@ -22,7 +25,7 @@ type ClusterScopedCache struct {
 // NewClusterScopedCache returns a new ClusterScopedCache
 func NewClusterScopedCache() *ClusterScopedCache {
 	return &ClusterScopedCache{
-		GvkInformers: make(GvkToInformers),
+		GvkInformers: make(components.GvkToInformers),
 		started:      false,
 	}
 }
@@ -43,7 +46,7 @@ func (csc *ClusterScopedCache) Get(key types.NamespacedName, gvk schema.GroupVer
 
 	// Check if any informers exist for the provided gvk
 	if _, ok := csc.GvkInformers[gvk]; !ok {
-		return nil, NewInformerNotFoundErr(fmt.Errorf("informer with cluster level watch not found for GVK %q", gvk))
+		return nil, errors.NewInformerNotFoundErr(fmt.Errorf("informer with cluster level watch not found for GVK %q", gvk))
 	}
 
 	// Loop through all informers and attempt to get the requested resource
@@ -79,7 +82,7 @@ func (csc *ClusterScopedCache) List(listOpts client.ListOptions, gvk schema.Grou
 	retList := []runtime.Object{}
 
 	if _, ok := csc.GvkInformers[gvk]; !ok {
-		return nil, NewInformerNotFoundErr(fmt.Errorf("informer with cluster level watch not found for GVK %q", gvk))
+		return nil, errors.NewInformerNotFoundErr(fmt.Errorf("informer with cluster level watch not found for GVK %q", gvk))
 	}
 
 	for _, si := range csc.GvkInformers[gvk] {
@@ -93,7 +96,7 @@ func (csc *ClusterScopedCache) List(listOpts client.ListOptions, gvk schema.Grou
 		retList = append(retList, list...)
 	}
 
-	deduplicatedList, err := deduplicateList(retList)
+	deduplicatedList, err := util.DeduplicateList(retList)
 	if err != nil {
 		return nil, err
 	}
@@ -109,16 +112,16 @@ func (csc *ClusterScopedCache) List(listOpts client.ListOptions, gvk schema.Grou
 // - Set the WatchErrorHandler on the ScopeInformer to forcefully remove
 // the ScopeInformer from the cache
 // - If the ClusterScopedCache has been started, start the ScopeInformer
-func (csc *ClusterScopedCache) AddInformer(infOpts InformerOptions) {
+func (csc *ClusterScopedCache) AddInformer(infOpts components.InformerOptions) {
 	csc.mu.Lock()
 	defer csc.mu.Unlock()
 
 	// Create the ScopeInformer
-	si := NewScopeInformer(infOpts.Informer)
+	si := components.NewScopeInformer(infOpts.Informer)
 
 	// Add necessary mappings to the cache
 	if _, ok := csc.GvkInformers[infOpts.Gvk]; !ok {
-		csc.GvkInformers[infOpts.Gvk] = make(Informers)
+		csc.GvkInformers[infOpts.Gvk] = make(components.Informers)
 	}
 
 	if _, ok := csc.GvkInformers[infOpts.Gvk][infOpts.Key]; !ok {
@@ -155,7 +158,7 @@ func (csc *ClusterScopedCache) AddInformer(infOpts InformerOptions) {
 // forced delete the informer from the cache and terminate it.
 // - If there are no more informers for the given GVK ,
 // remove it from the cache
-func (csc *ClusterScopedCache) RemoveInformer(infOpts InformerOptions, force bool) {
+func (csc *ClusterScopedCache) RemoveInformer(infOpts components.InformerOptions, force bool) {
 	csc.mu.Lock()
 	defer csc.mu.Unlock()
 
@@ -214,8 +217,8 @@ func (csc *ClusterScopedCache) Synced() bool {
 }
 
 // GvkHasInformer returns whether or not an informer
-// exists in the cache for the provided InformerOptions
-func (csc *ClusterScopedCache) HasInformer(infOpts InformerOptions) bool {
+// exists in the cache for the provided components.InformerOptions
+func (csc *ClusterScopedCache) HasInformer(infOpts components.InformerOptions) bool {
 	csc.mu.Lock()
 	defer csc.mu.Unlock()
 	has := false

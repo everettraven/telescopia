@@ -1,15 +1,15 @@
-package cache
+package components
 
 import (
 	"context"
 	"fmt"
 	"time"
 
+	"github.com/everettraven/telescopia/pkg/cache/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/tools/cache"
@@ -113,7 +113,7 @@ func (si *ScopeInformer) List(listOpts client.ListOptions) ([]runtime.Object, er
 // AddEventHandler will add an event handler
 // to the ScopeInformer
 func (si *ScopeInformer) AddEventHandler(handler cache.ResourceEventHandler) {
-	key := fmt.Sprintf("scopeinformer-addeventhandler-%s", HashObject(handler))
+	key := fmt.Sprintf("scopeinformer-addeventhandler-%s", util.HashObject(handler))
 	// only add the event listener if it hasn't already been added to this informer
 	if _, ok := si.eventListeners[key]; !ok {
 		si.eventListeners[key] = handler
@@ -124,7 +124,7 @@ func (si *ScopeInformer) AddEventHandler(handler cache.ResourceEventHandler) {
 // AddEventHandlerWithResyncPeriod will add an event handler
 // with a specific resync period to the ScopeInformer
 func (si *ScopeInformer) AddEventHandlerWithResyncPeriod(handler cache.ResourceEventHandler, resyncPeriod time.Duration) {
-	key := fmt.Sprintf("scopeinformer-addeventhandlerwithresyncperiod-%s", HashObject(handler))
+	key := fmt.Sprintf("scopeinformer-addeventhandlerwithresyncperiod-%s", util.HashObject(handler))
 	// only add the event listener if it hasn't already been added to this informer
 	if _, ok := si.eventListeners[key]; !ok {
 		si.eventListeners[key] = handler
@@ -148,84 +148,6 @@ func (si *ScopeInformer) HasSynced() bool {
 // error handler for the ScopeInformer
 func (si *ScopeInformer) SetWatchErrorHandler(handler cache.WatchErrorHandler) error {
 	return si.informer.Informer().SetWatchErrorHandler(handler)
-}
-
-// Informers is a mapping of a string
-// (meant to be a unique string) to a ScopeInformer
-type Informers map[string]*ScopeInformer
-
-// GvkToInformers is a mapping of GVK to Informers
-type GvkToInformers map[schema.GroupVersionKind]Informers
-
-// InformerOptions are meant to set options
-// when adding an informer to a cache
-type InformerOptions struct {
-	// Namespace the informer is watching
-	Namespace string
-	// GVK the informer is watching
-	Gvk schema.GroupVersionKind
-	// Unique identifier for the informer
-	Key string
-	// The informer itself
-	Informer informers.GenericInformer
-	// The resource dependent on the informer
-	Dependent metav1.Object
-}
-
-// InformerNotFoundErr is an error to
-// represent that an informer was not
-// found for the given request
-type InformerNotFoundErr struct {
-	Err error
-}
-
-// NewInformerNotFoundErr creates a new InformerNotFoundErr
-// for the provided error
-func NewInformerNotFoundErr(err error) *InformerNotFoundErr {
-	return &InformerNotFoundErr{
-		Err: err,
-	}
-}
-
-// Error returns the string representation of the error
-func (infe *InformerNotFoundErr) Error() string {
-	return infe.Err.Error()
-}
-
-// IsInformerNotFoundErr checks whether or not the
-// provided error is of type InformerNotFoundError
-func IsInformerNotFoundErr(err error) bool {
-	_, ok := err.(*InformerNotFoundErr)
-	return ok
-}
-
-// CacheNotFoundErr is an error to
-// represent that an object was not
-// found by the cache. This could mean
-// that an informer has not been created
-// that would find the requested resource
-type CacheNotFoundErr struct {
-	Err error
-}
-
-// NewCacheNotFoundErr creates a new CacheNotFoundErr
-// for the provided error
-func NewCacheNotFoundErr(err error) *CacheNotFoundErr {
-	return &CacheNotFoundErr{
-		Err: err,
-	}
-}
-
-// Error returns the string representation of the error
-func (cnfe *CacheNotFoundErr) Error() string {
-	return cnfe.Err.Error()
-}
-
-// IsCacheNotFoundErr checks whether or not the
-// provided error is of type CacheNotFoundErr
-func IsCacheNotFoundErr(err error) bool {
-	_, ok := err.(*CacheNotFoundErr)
-	return ok
 }
 
 // WatchErrorHandlerForScopeInformer is a helper for
