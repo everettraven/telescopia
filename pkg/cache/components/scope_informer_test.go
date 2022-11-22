@@ -245,58 +245,6 @@ var _ = Describe("ScopeInformer Unit Tests", func() {
 
 		// TODO: Figure out why this is panicking
 		When("Listing a resource via the informer", func() {
-			BeforeEach(func() {
-				for i := 0; i < 2; i++ {
-					namespace := fmt.Sprintf("test-ns-%d", i)
-					createNs := func() error {
-						_, err := k8sClient.CoreV1().Namespaces().Create(context.Background(), &corev1.Namespace{ObjectMeta: v1.ObjectMeta{Name: namespace}}, v1.CreateOptions{})
-						return err
-					}
-					Eventually(createNs).ShouldNot(HaveOccurred())
-
-					for j := 0; j < 5; j++ {
-						expPod := &corev1.Pod{
-							ObjectMeta: v1.ObjectMeta{
-								Namespace: namespace,
-								Name:      fmt.Sprintf("test-pod-%d", j),
-							},
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{
-										Name:  "nginx",
-										Image: "nginx:1.14.2",
-										Ports: []corev1.ContainerPort{
-											{
-												ContainerPort: 80,
-											},
-										},
-									},
-								},
-							},
-						}
-						createPod := func() error {
-							_, err := k8sClient.CoreV1().Pods(namespace).Create(context.Background(), expPod, v1.CreateOptions{})
-							return err
-						}
-						Eventually(createPod).ShouldNot(HaveOccurred())
-					}
-				}
-			})
-
-			AfterEach(func() {
-				for i := 0; i < 2; i++ {
-					namespace := fmt.Sprintf("test-ns-%d", i)
-
-					for j := 0; j < 5; j++ {
-						err := k8sClient.CoreV1().Pods(namespace).Delete(context.Background(), fmt.Sprintf("test-pod-%d", j), v1.DeleteOptions{})
-						Expect(err).ShouldNot(HaveOccurred())
-					}
-
-					err := k8sClient.CoreV1().Namespaces().Delete(context.Background(), namespace, v1.DeleteOptions{})
-					Expect(err).ShouldNot(HaveOccurred())
-				}
-			})
-
 			It("Should list all pods in a specific namespace", func() {
 				go si.Run()
 				started := func() bool {
@@ -309,7 +257,7 @@ var _ = Describe("ScopeInformer Unit Tests", func() {
 				Expect(len(objs)).Should(Equal(5))
 			})
 
-			FIt("Should list all pods across the cluster", func() {
+			It("Should list all pods across the cluster", func() {
 				go si.Run()
 				started := func() bool {
 					return si.HasSynced()
