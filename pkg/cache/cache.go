@@ -6,6 +6,10 @@ import (
 	"reflect"
 	"strings"
 
+	"github.com/everettraven/telescopia/pkg/cache/cluster"
+	"github.com/everettraven/telescopia/pkg/cache/components"
+	"github.com/everettraven/telescopia/pkg/cache/namespace"
+	"github.com/everettraven/telescopia/pkg/cache/util"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
@@ -23,10 +27,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 )
 
-// ScopeInformerFactory is a function that is used to create a
-// informers.GenericInformer for the provided GVR and SharedInformerOptions.
-type ScopeInformerFactory func(gvr schema.GroupVersionResource, options ...informers.SharedInformerOption) (informers.GenericInformer, error)
-
 // ScopedCache is a wrapper around the
 // NamespaceScopedCache and ClusterScopedCache
 // that implements the controller-runtime
@@ -37,10 +37,10 @@ type ScopeInformerFactory func(gvr schema.GroupVersionResource, options ...infor
 type ScopedCache struct {
 	// nsCache is the NamespaceScopedCache
 	// being wrapped by the ScopedCache
-	nsCache *NamespaceScopedCache
+	nsCache *namespace.NamespaceScopedCache
 	// clusterCache is the ClusterScopedCache
 	// being wrapped by the ScopedCache
-	clusterCache *ClusterScopedCache
+	clusterCache *cluster.ClusterScopedCache
 	// RESTMapper is used when determining
 	// if an API is namespaced or not
 	RESTMapper apimeta.RESTMapper
@@ -62,31 +62,19 @@ type ScopedCache struct {
 	cli dynamic.Interface
 }
 
-// ScopedCacheOption is a function to set values on the ScopedCache
-type ScopedCacheOption func(*ScopedCache)
-
-// WithScopedInformerFactory is an option that can be used
-// to set the ScopedCache.scopedInformerFactory field when
-// creating a new ScopedCache.
-func WithScopedInformerFactory(sif ScopeInformerFactory) ScopedCacheOption {
-	return func(sc *ScopedCache) {
-		sc.scopeInformerFactory = sif
-	}
-}
-
 // ScopeCacheBuilder is a builder function that
 // can be used to return a controller-runtime
 // cache.NewCacheFunc. This function enables controller-runtime
 // to properly create a new ScopedCache
 func ScopedCacheBuilder(scOpts ...ScopedCacheOption) crcache.NewCacheFunc {
 	return func(config *rest.Config, opts crcache.Options) (crcache.Cache, error) {
-		opts, err := defaultOpts(config, opts)
+		opts, err := util.DefaultOpts(config, opts)
 		if err != nil {
 			return nil, err
 		}
 
-		namespacedCache := NewNamespaceScopedCache()
-		clusterCache := NewClusterScopedCache()
+		namespacedCache := namespace.NewNamespaceScopedCache()
+		clusterCache := cluster.NewClusterScopedCache()
 
 		cli := dynamic.NewForConfigOrDie(config)
 
@@ -126,7 +114,7 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 		return err
 	}
 
-	permitted, err := canVerbResource(sc.cli, mapping.Resource, "get", key.Namespace)
+	permitted, err := util.CanVerbResource(sc.cli, mapping.Resource, "get", key.Namespace)
 	if err != nil {
 		return fmt.Errorf("checking \"get\" permissions for resource: %w", err)
 	}
@@ -161,7 +149,7 @@ func (sc *ScopedCache) Get(ctx context.Context, key client.ObjectKey, obj client
 		if !permitted {
 			// remove the informers in the cluster cache
 			for infKey := range sc.nsCache.Namespaces[key.Namespace][gvk] {
-				infOpt := InformerOptions{
+				infOpt := components.InformerOptions{
 					Namespace: key.Namespace,
 					Gvk:       gvk,
 					Key:       infKey,
@@ -221,7 +209,7 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 		return err
 	}
 
-	permitted, err := canVerbResource(sc.cli, mapping.Resource, "list", listOpts.Namespace)
+	permitted, err := util.CanVerbResource(sc.cli, mapping.Resource, "list", listOpts.Namespace)
 	if err != nil {
 		return fmt.Errorf("checking \"list\" permissions for resource: %w", err)
 	}
@@ -261,7 +249,7 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 		if !permitted {
 			// remove the informers in the cluster cache
 			for key := range sc.nsCache.Namespaces[listOpts.Namespace][gvk] {
-				infOpt := InformerOptions{
+				infOpt := components.InformerOptions{
 					Namespace: listOpts.Namespace,
 					Gvk:       gvk,
 					Key:       key,
@@ -282,28 +270,6 @@ func (sc *ScopedCache) List(ctx context.Context, list client.ObjectList, opts ..
 	allItems = append(allItems, objs...)
 
 	return apimeta.SetList(list, allItems)
-}
-
-// deduplicateList is meant to remove duplicate objects from a list of objects
-func deduplicateList(objs []runtime.Object) ([]runtime.Object, error) {
-	uidMap := make(map[types.UID]struct{})
-	objList := []runtime.Object{}
-
-	for _, obj := range objs {
-		cpObj := obj.DeepCopyObject()
-		// turn runtime.Object to a client.Object so we can get the resource UID
-		crObj, ok := cpObj.(client.Object)
-		if !ok {
-			return nil, fmt.Errorf("could not convert list item to client.Object")
-		}
-		// if the UID of the resource is not already in the map then it is a new object
-		// and can be added to the list.
-		if _, ok := uidMap[crObj.GetUID()]; !ok {
-			objList = append(objList, cpObj)
-		}
-	}
-
-	return objList, nil
 }
 
 // ----------------------
@@ -342,13 +308,13 @@ func (sc *ScopedCache) GetInformer(ctx context.Context, obj client.Object) (crca
 	}
 
 	// create the informer options
-	infOpts := InformerOptions{
+	infOpts := components.InformerOptions{
 		Gvk: gvk,
-		Key: fmt.Sprintf("scopedcache-getinformer-%s", HashObject(obj)),
+		Key: fmt.Sprintf("scopedcache-getinformer-%s", util.HashObject(obj)),
 		// TODO: We should probably create our own type that implements the
 		// controller-runtime client.Object interface to use instead of an
 		// arbitrary type (like Namespace in this case)
-		Dependent: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{UID: types.UID(HashObject(obj))}},
+		Dependent: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{UID: types.UID(util.HashObject(obj))}},
 	}
 
 	var inf informers.GenericInformer
@@ -411,10 +377,10 @@ func (sc *ScopedCache) GetInformerForKind(ctx context.Context, gvk schema.GroupV
 		return nil, err
 	}
 
-	infOpts := InformerOptions{
+	infOpts := components.InformerOptions{
 		Gvk:       gvk,
-		Key:       fmt.Sprintf("scopedcache-getinformer-%s", HashObject(gvk)),
-		Dependent: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{UID: types.UID(HashObject(gvk))}},
+		Key:       fmt.Sprintf("scopedcache-getinformer-%s", util.HashObject(gvk)),
+		Dependent: &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{UID: types.UID(util.HashObject(gvk))}},
 	}
 
 	if si, ok := sc.clusterCache.GvkInformers[infOpts.Gvk][infOpts.Key]; !ok {
@@ -507,7 +473,7 @@ func (sc *ScopedCache) IndexField(ctx context.Context, obj client.Object, field 
 
 // AddInformer will add an informer to the appropriate
 // cache based on the informer options provided.
-func (sc *ScopedCache) AddInformer(infOpts InformerOptions) {
+func (sc *ScopedCache) AddInformer(infOpts components.InformerOptions) {
 	if infOpts.Namespace != "" {
 		sc.nsCache.AddInformer(infOpts)
 	} else {
@@ -517,7 +483,7 @@ func (sc *ScopedCache) AddInformer(infOpts InformerOptions) {
 
 // RemoveInformer will remove an informer from the appropriate
 // cache based on the informer options provided.
-func (sc *ScopedCache) RemoveInformer(infOpts InformerOptions, force bool) {
+func (sc *ScopedCache) RemoveInformer(infOpts components.InformerOptions, force bool) {
 	if infOpts.Namespace != "" {
 		sc.nsCache.RemoveInformer(infOpts, force)
 	} else {
@@ -527,7 +493,7 @@ func (sc *ScopedCache) RemoveInformer(infOpts InformerOptions, force bool) {
 
 // GvkHasInformer returns whether or not an informer
 // exists in the cache for the provided InformerOptions
-func (sc *ScopedCache) HasInformer(infOpts InformerOptions) bool {
+func (sc *ScopedCache) HasInformer(infOpts components.InformerOptions) bool {
 	if infOpts.Namespace != "" {
 		return sc.nsCache.HasInformer(infOpts)
 	} else {

@@ -7,6 +7,9 @@ import (
 	"time"
 
 	scopecache "github.com/everettraven/telescopia/pkg/cache"
+	"github.com/everettraven/telescopia/pkg/cache/cluster"
+	"github.com/everettraven/telescopia/pkg/cache/components"
+	"github.com/everettraven/telescopia/pkg/cache/namespace"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -63,7 +66,7 @@ func scopedCache() {
 		fmt.Println("error in getting pod informer | error:", err)
 	}
 
-	scopeCache.AddInformer(scopecache.InformerOptions{
+	scopeCache.AddInformer(components.InformerOptions{
 		Gvk:      saGvk,
 		Key:      "serviceaccount-informer",
 		Informer: saInf,
@@ -86,7 +89,7 @@ func scopedCache() {
 			continue
 		}
 
-		scopeCache.AddInformer(scopecache.InformerOptions{
+		scopeCache.AddInformer(components.InformerOptions{
 			Namespace: namespace,
 			Gvk:       podGvk,
 			Key:       "pod-informer",
@@ -160,7 +163,7 @@ func scopedCache() {
 func clusterCache() {
 	cfg := config.GetConfigOrDie()
 
-	clusterCache := scopecache.NewClusterScopedCache()
+	clusterCache := cluster.NewClusterScopedCache()
 
 	cli, err := client.New(cfg, client.Options{})
 	if err != nil {
@@ -182,7 +185,7 @@ func clusterCache() {
 		fmt.Println("error in getting pod informer | error:", err)
 	}
 
-	clusterCache.AddInformer(scopecache.InformerOptions{
+	clusterCache.AddInformer(components.InformerOptions{
 		Gvk:      podGvk,
 		Key:      "pod-informer",
 		Informer: podInf,
@@ -194,7 +197,7 @@ func clusterCache() {
 	})
 
 	// add the informer again with a different dependent
-	clusterCache.AddInformer(scopecache.InformerOptions{
+	clusterCache.AddInformer(components.InformerOptions{
 		Gvk:      podGvk,
 		Key:      "pod-informer",
 		Informer: podInf,
@@ -248,7 +251,7 @@ func clusterCache() {
 func namespacedCache() {
 	cfg := config.GetConfigOrDie()
 
-	namespacedCache := scopecache.NewNamespaceScopedCache()
+	namespacedCache := namespace.NewNamespaceScopedCache()
 
 	cli, err := client.New(cfg, client.Options{})
 	if err != nil {
@@ -277,7 +280,7 @@ func namespacedCache() {
 			continue
 		}
 
-		namespacedCache.AddInformer(scopecache.InformerOptions{
+		namespacedCache.AddInformer(components.InformerOptions{
 			Namespace: namespace,
 			Gvk:       podGvk,
 			Key:       "pod-informer",

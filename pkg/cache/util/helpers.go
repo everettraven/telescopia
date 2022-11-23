@@ -1,4 +1,4 @@
-package cache
+package util
 
 import (
 	"context"
@@ -15,11 +15,13 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"k8s.io/kubectl/pkg/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/apiutil"
 )
 
@@ -27,7 +29,7 @@ import (
 // --------------------------------
 var defaultResyncTime = 10 * time.Hour
 
-func defaultOpts(config *rest.Config, opts cache.Options) (cache.Options, error) {
+func DefaultOpts(config *rest.Config, opts cache.Options) (cache.Options, error) {
 	// Use the default Kubernetes Scheme if unset
 	if opts.Scheme == nil {
 		opts.Scheme = scheme.Scheme
@@ -107,10 +109,10 @@ func createSSAR(cli dynamic.Interface, ssar *authv1.SelfSubjectAccessReview) (*a
 	return createdSSAR, nil
 }
 
-// canVerbResource will create a SelfSubjectAccessReview for a given resource, verb, and namespace and return whether or
+// CanVerbResource will create a SelfSubjectAccessReview for a given resource, verb, and namespace and return whether or
 // not a user/ServiceAccount has the permissions to "verb" (get, list, watch, etc.) the given resource in the given namespace.
 // A namespace value of ""(empty) will result in checking permissions in all namespaces (cluster-scoped)
-func canVerbResource(cli dynamic.Interface, gvr schema.GroupVersionResource, verb string, namespace string) (bool, error) {
+func CanVerbResource(cli dynamic.Interface, gvr schema.GroupVersionResource, verb string, namespace string) (bool, error) {
 	// Check if we have cluster permissions to list the resource
 	// create the cluster level SelfSubjectAccessReview
 	ssar := &authv1.SelfSubjectAccessReview{
@@ -133,30 +135,6 @@ func canVerbResource(cli dynamic.Interface, gvr schema.GroupVersionResource, ver
 	return createdSSAR.Status.Allowed, nil
 }
 
-// canClusterListWatchResource is a helper function to determine if a user/ServiceAccount has permissions
-// to list and watch a given resource across the cluster (all namespaces).
-func canClusterListWatchResource(cli dynamic.Interface, gvr schema.GroupVersionResource) (bool, error) {
-	return canListWatchResourceForNamespace(cli, gvr, "")
-}
-
-// canListWatchResourceForNamespace will create a SelfSubjectAccessReview to see if a user/ServiceAccount has
-// permissions to list and watch a given resource in a given namespace. If the namespace is ""(empty) then it will
-// check if the permissions are available in all namespaces (cluster-scoped). It returns true if the user/ServiceAccount
-// has list and watch permissions for the given resource in the given namespace
-func canListWatchResourceForNamespace(cli dynamic.Interface, gvr schema.GroupVersionResource, namespace string) (bool, error) {
-	canList, err := canVerbResource(cli, gvr, "list", namespace)
-	if err != nil {
-		return false, err
-	}
-
-	canWatch, err := canVerbResource(cli, gvr, "watch", namespace)
-	if err != nil {
-		return false, err
-	}
-
-	return canList && canWatch, nil
-}
-
 // HashObject calculates a hash from an object
 func HashObject(obj interface{}) string {
 	hasher := fnv.New32a()
@@ -176,4 +154,26 @@ func deepHashObject(hasher hash.Hash, objectToWrite interface{}) {
 		SpewKeys:       true,
 	}
 	printer.Fprintf(hasher, "%#v", objectToWrite)
+}
+
+// DeduplicateList is meant to remove duplicate objects from a list of objects
+func DeduplicateList(objs []runtime.Object) ([]runtime.Object, error) {
+	uidMap := make(map[types.UID]struct{})
+	objList := []runtime.Object{}
+
+	for _, obj := range objs {
+		cpObj := obj.DeepCopyObject()
+		// turn runtime.Object to a client.Object so we can get the resource UID
+		crObj, ok := cpObj.(client.Object)
+		if !ok {
+			return nil, fmt.Errorf("could not convert list item to client.Object")
+		}
+		// if the UID of the resource is not already in the map then it is a new object
+		// and can be added to the list.
+		if _, ok := uidMap[crObj.GetUID()]; !ok {
+			objList = append(objList, cpObj)
+		}
+	}
+
+	return objList, nil
 }
