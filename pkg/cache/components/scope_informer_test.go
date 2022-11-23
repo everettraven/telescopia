@@ -243,7 +243,6 @@ var _ = Describe("ScopeInformer Unit Tests", func() {
 			})
 		})
 
-		// TODO: Figure out why this is panicking
 		When("Listing a resource via the informer", func() {
 			It("Should list all pods in a specific namespace", func() {
 				go si.Run()
