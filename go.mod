@@ -3,7 +3,6 @@ module github.com/everettraven/telescopia
 go 1.18
 
 require (
-	golang.org/x/vuln v0.0.0-20221111165027-50a0e29f49cc
 	k8s.io/apimachinery v0.24.3
 	sigs.k8s.io/controller-runtime v0.12.3
 )
@@ -11,7 +10,6 @@ require (
 require (
 	github.com/imdario/mergo v0.3.12 // indirect
 	github.com/spf13/pflag v1.0.5 // indirect
-	golang.org/x/mod v0.6.0 // indirect
 	k8s.io/apiextensions-apiserver v0.24.2 // indirect
 )
 
