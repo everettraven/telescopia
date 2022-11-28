@@ -42,7 +42,9 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 	Expect(k8sClient).NotTo(BeNil())
 
-	// initialize a set of namespaces and pods
+	// initialize 2 namespaces with 5 pods each
+	// namespaces are named following the pattern `test-ns-#`
+	// pods are named following the pattern `test-pod-#`
 	for i := 0; i < 2; i++ {
 		namespace := fmt.Sprintf("test-ns-%d", i)
 		createNs := func() error {

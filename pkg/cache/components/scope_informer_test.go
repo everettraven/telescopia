@@ -91,23 +91,20 @@ var _ = Describe("ScopeInformer Unit Tests", func() {
 				Expect(siDeps).Should(HaveKeyWithValue(dependent.GetUID(), dependent))
 			})
 
-			It("Should have the dependent", func() {
+			It("Should return true when using ScopeInformer.HasDependent()", func() {
 				Expect(si.HasDependent(dependent)).Should(BeTrue())
 			})
 
 			When("Removing the Dependent", func() {
-				BeforeEach(func() {
-					si.RemoveDependent(dependent)
-				})
-
 				It("Should not have the dependent", func() {
+					si.RemoveDependent(dependent)
 					Expect(si.HasDependent(dependent)).Should(BeFalse())
 				})
 			})
 		})
 
 		When("Calling AddEventHandler()", func() {
-			It("Should be added to the ScopeInformer.informer if it hasn't been before", func() {
+			It("Should add the cache.ResourceEventHandler to the ScopeInformer.informer if it hasn't been added before", func() {
 				handler := cache.ResourceEventHandlerFuncs{}
 				key := fmt.Sprintf("scopeinformer-addeventhandler-%s", util.HashObject(handler))
 
@@ -117,7 +114,7 @@ var _ = Describe("ScopeInformer Unit Tests", func() {
 		})
 
 		When("Calling AddEventHandlerWithResyncPeriod()", func() {
-			It("Should be added to the ScopeInformer.informer if it hasn't been before", func() {
+			It("Should add the cache.ResourceEventHandler to the ScopeInformer.informer with the specified resyncPeriod if it hasn't been added before", func() {
 				handler := cache.ResourceEventHandlerFuncs{}
 				key := fmt.Sprintf("scopeinformer-addeventhandlerwithresyncperiod-%s", util.HashObject(handler))
 
@@ -127,7 +124,7 @@ var _ = Describe("ScopeInformer Unit Tests", func() {
 		})
 
 		When("Setting the WatchErrorHandler", func() {
-			It("Should add the WatchErrorHandler to the ScopeInformer.informer", func() {
+			It("Should add the cache.WatchErrorHandler to the ScopeInformer.informer", func() {
 				Expect(si.SetWatchErrorHandler(cache.DefaultWatchErrorHandler)).ShouldNot(HaveOccurred())
 			})
 
