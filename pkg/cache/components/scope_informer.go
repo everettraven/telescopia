@@ -9,6 +9,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
@@ -103,6 +104,11 @@ func (si *ScopeInformer) Get(key string) (runtime.Object, error) {
 // List will list kubernetes resources based
 // on the provided list options
 func (si *ScopeInformer) List(listOpts client.ListOptions) ([]runtime.Object, error) {
+	// TODO: is this acceptable or should we return an error?
+	if listOpts.LabelSelector == nil {
+		listOpts.LabelSelector = labels.Everything()
+	}
+
 	if listOpts.Namespace != corev1.NamespaceAll {
 		return si.informer.Lister().ByNamespace(listOpts.Namespace).List(listOpts.LabelSelector)
 	}
