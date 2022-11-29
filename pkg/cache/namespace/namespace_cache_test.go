@@ -22,6 +22,7 @@ var _ = Describe("NamespaceScopedCache Unit Tests", func() {
 
 	BeforeEach(func() {
 		nsCache = NewNamespaceScopedCache()
+		Expect(nsCache).ShouldNot(BeNil())
 
 		informerFactory = informers.NewSharedInformerFactory(k8sClient, 10*time.Second)
 		Expect(informerFactory).NotTo(BeNil())
