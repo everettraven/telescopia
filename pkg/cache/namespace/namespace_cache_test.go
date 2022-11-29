@@ -43,15 +43,11 @@ var _ = Describe("NamespaceScopedCache Unit Tests", func() {
 	When("Adding an Informer with NamespaceScopedCache.AddInformer()", func() {
 		It("Should create the mapping of Namespace --> GVK --> Informer Key --> ScopeInformer", func() {
 			nsCache.AddInformer(infOpts)
-			Expect(nsCache.Namespaces).Should(HaveKey(infOpts.Namespace))
-			Expect(nsCache.Namespaces[infOpts.Namespace]).Should(HaveKey(infOpts.Gvk))
-			Expect(nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk]).Should(HaveKey(infOpts.Key))
+			verifyMappings(nsCache, infOpts)
 
 			infOpts.Gvk = corev1.SchemeGroupVersion.WithKind("ConfigMap")
 			nsCache.AddInformer(infOpts)
-			Expect(nsCache.Namespaces).Should(HaveKey(infOpts.Namespace))
-			Expect(nsCache.Namespaces[infOpts.Namespace]).Should(HaveKey(infOpts.Gvk))
-			Expect(nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk]).Should(HaveKey(infOpts.Key))
+			verifyMappings(nsCache, infOpts)
 
 			Expect(len(nsCache.Namespaces[infOpts.Namespace])).Should(Equal(2))
 
@@ -118,10 +114,7 @@ var _ = Describe("NamespaceScopedCache Unit Tests", func() {
 			}
 
 			nsCache.RemoveInformer(invalidInfOpts, false)
-
-			Expect(nsCache.Namespaces).Should(HaveKey(infOpts.Namespace))
-			Expect(nsCache.Namespaces[infOpts.Namespace]).Should(HaveKey(infOpts.Gvk))
-			Expect(nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk]).Should(HaveKey(infOpts.Key))
+			verifyMappings(nsCache, infOpts)
 		})
 
 		It("Should remove the dependent from the ScopeInformer based on the InformerOptions provided", func() {
@@ -168,9 +161,7 @@ var _ = Describe("NamespaceScopedCache Unit Tests", func() {
 
 			// remove the informer
 			nsCache.RemoveInformer(oldInfOpts, true)
-			Expect(nsCache.Namespaces).Should(HaveKey(infOpts.Namespace))
-			Expect(nsCache.Namespaces[infOpts.Namespace]).Should(HaveKey(infOpts.Gvk))
-			Expect(nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk]).Should(HaveKey(infOpts.Key))
+			verifyMappings(nsCache, infOpts)
 			Expect(nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk]).ShouldNot(HaveKey(oldInfOpts.Key))
 		})
 
@@ -184,10 +175,8 @@ var _ = Describe("NamespaceScopedCache Unit Tests", func() {
 
 			// remove the informer
 			nsCache.RemoveInformer(oldInfOpts, true)
-			Expect(nsCache.Namespaces).Should(HaveKey(infOpts.Namespace))
-			Expect(nsCache.Namespaces[infOpts.Namespace]).Should(HaveKey(infOpts.Gvk))
+			verifyMappings(nsCache, infOpts)
 			Expect(nsCache.Namespaces[infOpts.Namespace]).ShouldNot(HaveKey(oldInfOpts.Gvk))
-			Expect(nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk]).Should(HaveKey(infOpts.Key))
 		})
 
 		It("Should only remove the Namespace, GVK, and Informer specified by the provided InformerOptions", func() {
@@ -201,49 +190,49 @@ var _ = Describe("NamespaceScopedCache Unit Tests", func() {
 
 			// remove the informer
 			nsCache.RemoveInformer(oldInfOpts, true)
-			Expect(nsCache.Namespaces).Should(HaveKey(infOpts.Namespace))
+			verifyMappings(nsCache, infOpts)
 			Expect(nsCache.Namespaces).ShouldNot(HaveKey(oldInfOpts.Namespace))
-			Expect(nsCache.Namespaces[infOpts.Namespace]).Should(HaveKey(infOpts.Gvk))
-			Expect(nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk]).Should(HaveKey(infOpts.Key))
 		})
 	})
 
 	// TODO(everettraven): Add tests for the `HasInformer()` function
 	When("Checking if an Informer already exists in the NamespaceScopedCache with NamespaceScopedCache.HasInformer()", func() {
+		BeforeEach(func() {
+			nsCache.AddInformer(infOpts)
+		})
+
 		It("Should return false if the cache is empty", func() {
+			// for this case only just create a new NamespaceScopedCache
+			nsCache = NewNamespaceScopedCache()
 			Expect(nsCache.HasInformer(infOpts)).Should(BeFalse())
 		})
 
 		It("Should return false if the cache has a mapping for the namespace but not the GVK", func() {
-			nsCache.Namespaces[infOpts.Namespace] = make(components.GvkToInformers)
-			nsCache.Namespaces[infOpts.Namespace][corev1.SchemeGroupVersion.WithKind("ConfigMap")] = make(components.Informers)
+			infOpts.Gvk = corev1.SchemeGroupVersion.WithKind("ConfigMap")
 			Expect(nsCache.HasInformer(infOpts)).Should(BeFalse())
 		})
 
 		It("Should return false if the cache has a mapping for the namespace and GVK but not the informer key", func() {
-			nsCache.Namespaces[infOpts.Namespace] = make(components.GvkToInformers)
-			nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk] = make(components.Informers)
-			nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk]["invalid"] = components.NewScopeInformer(infOpts.Informer)
+			infOpts.Key = "invalid"
 			Expect(nsCache.HasInformer(infOpts)).Should(BeFalse())
 		})
 
 		It("Should return true if the cache has a mapping for the namespace, GVK, and informer key", func() {
-			nsCache.Namespaces[infOpts.Namespace] = make(components.GvkToInformers)
-			nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk] = make(components.Informers)
-			nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk][infOpts.Key] = components.NewScopeInformer(infOpts.Informer)
-			Expect(nsCache.HasInformer(infOpts)).Should(BeTrue())
-		})
-
-		It("Should return true after using NamespaceScopedCache.AddInformer() to add an with the same InformerOptions", func() {
-			nsCache.AddInformer(infOpts)
 			Expect(nsCache.HasInformer(infOpts)).Should(BeTrue())
 		})
 
 		It("Should return false after using NamespaceScopedCache.RemoveInformer() with the same InformerOptions", func() {
-			nsCache.AddInformer(infOpts)
-			Expect(nsCache.HasInformer(infOpts)).Should(BeTrue())
 			nsCache.RemoveInformer(infOpts, false)
 			Expect(nsCache.HasInformer(infOpts)).Should(BeFalse())
 		})
 	})
 })
+
+// verifyMappings is a helper function to ensure
+// that the proper mappings exist in the provided
+// NamespaceScopedCache for the provided InformerOptions
+func verifyMappings(nsCache *NamespaceScopedCache, infOpts components.InformerOptions) {
+	Expect(nsCache.Namespaces).Should(HaveKey(infOpts.Namespace))
+	Expect(nsCache.Namespaces[infOpts.Namespace]).Should(HaveKey(infOpts.Gvk))
+	Expect(nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk]).Should(HaveKey(infOpts.Key))
+}
