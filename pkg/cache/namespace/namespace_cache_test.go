@@ -1,14 +1,19 @@
 package namespace
 
 import (
+	"context"
+	"fmt"
 	"time"
 
 	"github.com/everettraven/telescopia/pkg/cache/components"
+	"github.com/everettraven/telescopia/pkg/cache/errors"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 )
@@ -195,7 +200,6 @@ var _ = Describe("NamespaceScopedCache Unit Tests", func() {
 		})
 	})
 
-	// TODO(everettraven): Add tests for the `HasInformer()` function
 	When("Checking if an Informer already exists in the NamespaceScopedCache with NamespaceScopedCache.HasInformer()", func() {
 		BeforeEach(func() {
 			nsCache.AddInformer(infOpts)
@@ -226,6 +230,65 @@ var _ = Describe("NamespaceScopedCache Unit Tests", func() {
 			Expect(nsCache.HasInformer(infOpts)).Should(BeFalse())
 		})
 	})
+
+	When("Getting resources with NamespaceScopedCache.Get()", func() {
+		BeforeEach(func() {
+			nsCache.AddInformer(infOpts)
+			nsCache.Start()
+
+			started := func() bool {
+				return nsCache.IsStarted()
+			}
+			Eventually(started).Should(BeTrue())
+		})
+
+		AfterEach(func() {
+			nsCache.Terminate()
+		})
+
+		It("Should return an InformerNotFoundErr if the provided Namespace doesn't exist in the cache", func() {
+			obj, err := nsCache.Get(types.NamespacedName{Namespace: "noinformers", Name: "test"}, appsv1.SchemeGroupVersion.WithKind("Deployment"))
+			Expect(obj).Should(BeNil())
+			Expect(err).ShouldNot(BeNil())
+			Expect(errors.IsInformerNotFoundErr(err)).Should(BeTrue())
+			Expect(err.Error()).Should(Equal("no informers at the namespace level exist for namespace \"noinformers\""))
+		})
+
+		It("Should return an InformerNotFoundErr if no informers for the provided GVK are found in the Namespace", func() {
+			gvk := appsv1.SchemeGroupVersion.WithKind("Deployment")
+			ns := "test-ns"
+			obj, err := nsCache.Get(types.NamespacedName{Namespace: ns, Name: "test"}, gvk)
+			Expect(obj).Should(BeNil())
+			Expect(err).ShouldNot(BeNil())
+			Expect(errors.IsInformerNotFoundErr(err)).Should(BeTrue())
+			Expect(err.Error()).Should(Equal(fmt.Sprintf("no informers at the namespace level exist in namespace %q for GVK %q", ns, gvk)))
+		})
+
+		It("Should return an error if the requested resource could not be found", func() {
+			gvk := corev1.SchemeGroupVersion.WithKind("Pod")
+			ns := "test-ns"
+			obj, err := nsCache.Get(types.NamespacedName{Namespace: ns, Name: "test"}, gvk)
+			Expect(obj).Should(BeNil())
+			Expect(err).ShouldNot(BeNil())
+			Expect(apierrors.IsNotFound(err)).Should(BeTrue())
+		})
+
+		It("Should return the runtime.Object if the resource could be found", func() {
+			createResources()
+			gvk := corev1.SchemeGroupVersion.WithKind("Pod")
+			ns := "test-ns"
+			obj, err := nsCache.Get(types.NamespacedName{Namespace: ns, Name: "test-pod-0"}, gvk)
+			Expect(err).Should(BeNil())
+			Expect(obj).ShouldNot(BeNil())
+			pod, ok := obj.(*corev1.Pod)
+			Expect(ok).Should(BeTrue())
+			Expect(pod.Name).Should(Equal("test-pod-0"))
+			Expect(pod.Namespace).Should(Equal(ns))
+			Expect(len(pod.Spec.Containers)).Should(Equal(1))
+			Expect(pod.Spec.Containers[0].Name).Should(Equal("nginx"))
+			Expect(pod.Spec.Containers[0].Image).Should(Equal("nginx:1.14.2"))
+		})
+	})
 })
 
 // verifyMappings is a helper function to ensure
@@ -235,4 +298,42 @@ func verifyMappings(nsCache *NamespaceScopedCache, infOpts components.InformerOp
 	Expect(nsCache.Namespaces).Should(HaveKey(infOpts.Namespace))
 	Expect(nsCache.Namespaces[infOpts.Namespace]).Should(HaveKey(infOpts.Gvk))
 	Expect(nsCache.Namespaces[infOpts.Namespace][infOpts.Gvk]).Should(HaveKey(infOpts.Key))
+}
+
+func createResources() {
+	// initialize a namespace named "test-ns"
+	// with 5 pods named in the pattern "test-pod-#"
+	namespace := "test-ns"
+	createNs := func() error {
+		_, err := k8sClient.CoreV1().Namespaces().Create(context.Background(), &corev1.Namespace{ObjectMeta: v1.ObjectMeta{Name: namespace}}, v1.CreateOptions{})
+		return err
+	}
+	Eventually(createNs).ShouldNot(HaveOccurred())
+
+	for i := 0; i < 5; i++ {
+		expPod := &corev1.Pod{
+			ObjectMeta: v1.ObjectMeta{
+				Namespace: namespace,
+				Name:      fmt.Sprintf("test-pod-%d", i),
+			},
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "nginx",
+						Image: "nginx:1.14.2",
+						Ports: []corev1.ContainerPort{
+							{
+								ContainerPort: 80,
+							},
+						},
+					},
+				},
+			},
+		}
+		createPod := func() error {
+			_, err := k8sClient.CoreV1().Pods(namespace).Create(context.Background(), expPod, v1.CreateOptions{})
+			return err
+		}
+		Eventually(createPod).ShouldNot(HaveOccurred())
+	}
 }

@@ -59,6 +59,7 @@ func (nsc *NamespaceScopedCache) Get(key types.NamespacedName, gvk schema.GroupV
 
 	// Loop through all informers and attempt to get the requested resource
 	for _, si := range nsc.Namespaces[key.Namespace][gvk] {
+		fmt.Println(si)
 		obj, err = si.Get(key.String())
 		if err != nil {
 			// ignore error because it *could* be found by another informer
@@ -73,7 +74,7 @@ func (nsc *NamespaceScopedCache) Get(key types.NamespacedName, gvk schema.GroupV
 	if found {
 		return obj, nil
 	} else {
-		return nil, errors.NewNotFound(schema.GroupResource{Group: gvk.Group, Resource: strings.ToLower(gvk.Kind) + "s"}, "could not find the given resource")
+		return nil, errors.NewNotFound(schema.GroupResource{Group: gvk.Group, Resource: strings.ToLower(gvk.Kind) + "s"}, key.String())
 	}
 }
 
@@ -241,6 +242,19 @@ func (nsc *NamespaceScopedCache) Start() {
 		}
 	}
 	nsc.started = true
+}
+
+func (nsc *NamespaceScopedCache) Terminate() {
+	nsc.mu.Lock()
+	defer nsc.mu.Unlock()
+	for nsKey := range nsc.Namespaces {
+		for gvkKey := range nsc.Namespaces[nsKey] {
+			for _, si := range nsc.Namespaces[nsKey][gvkKey] {
+				si.Terminate()
+			}
+		}
+	}
+	nsc.started = false
 }
 
 // IsStarted returns whether or not the cache has been started

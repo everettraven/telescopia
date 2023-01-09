@@ -6,6 +6,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
@@ -25,9 +27,13 @@ func TestComponents(t *testing.T) {
 }
 
 var _ = BeforeSuite(func() {
-	testEnv = &envtest.Environment{}
+	scheme := runtime.NewScheme()
+	err := corev1.AddToScheme(scheme)
+	Expect(err).Should(BeNil())
 
-	var err error
+	testEnv = &envtest.Environment{
+		Scheme: scheme,
+	}
 
 	// cfg is defined in this file globally.
 	cfg, err = testEnv.Start()
