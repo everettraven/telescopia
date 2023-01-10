@@ -243,12 +243,21 @@ func (nsc *NamespaceScopedCache) Start() {
 	nsc.started = true
 }
 
+// Terminate will shutdown all informers in the cache and
+// then proceed to shutdown the cache.
 func (nsc *NamespaceScopedCache) Terminate() {
 	nsc.mu.Lock()
 	defer nsc.mu.Unlock()
 	for nsKey := range nsc.Namespaces {
 		for gvkKey := range nsc.Namespaces[nsKey] {
 			for _, si := range nsc.Namespaces[nsKey][gvkKey] {
+				// TODO: because terminating the informers cancels
+				// the context they were using to run these informers won't
+				// be able to be run again. This makes the Terminate() function
+				// more like a "Kill" signal and is not a graceful shutdown of the
+				// cache. In order to make this more graceful, we should update the
+				// ScopeInformer termination logic to create a new context to be used
+				// in the event the cache is restarted.
 				si.Terminate()
 			}
 		}
