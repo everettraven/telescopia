@@ -59,7 +59,6 @@ func (nsc *NamespaceScopedCache) Get(key types.NamespacedName, gvk schema.GroupV
 
 	// Loop through all informers and attempt to get the requested resource
 	for _, si := range nsc.Namespaces[key.Namespace][gvk] {
-		fmt.Println(si)
 		obj, err = si.Get(key.String())
 		if err != nil {
 			// ignore error because it *could* be found by another informer
