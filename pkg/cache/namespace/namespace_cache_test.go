@@ -1,16 +1,20 @@
 package namespace
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/everettraven/telescopia/pkg/cache/components"
+	"github.com/everettraven/telescopia/pkg/cache/errors"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 var _ = Describe("NamespaceScopedCache Unit Tests", func() {
@@ -195,7 +199,6 @@ var _ = Describe("NamespaceScopedCache Unit Tests", func() {
 		})
 	})
 
-	// TODO(everettraven): Add tests for the `HasInformer()` function
 	When("Checking if an Informer already exists in the NamespaceScopedCache with NamespaceScopedCache.HasInformer()", func() {
 		BeforeEach(func() {
 			nsCache.AddInformer(infOpts)
@@ -226,6 +229,123 @@ var _ = Describe("NamespaceScopedCache Unit Tests", func() {
 			Expect(nsCache.HasInformer(infOpts)).Should(BeFalse())
 		})
 	})
+
+	Context("Retrieving resources", func() {
+		BeforeEach(func() {
+			nsCache.AddInformer(infOpts)
+			nsCache.Start()
+
+			started := func() bool {
+				return nsCache.Synced()
+			}
+			Eventually(started).Should(BeTrue())
+		})
+
+		AfterEach(func() {
+			nsCache.Terminate()
+		})
+		When("Getting resources with NamespaceScopedCache.Get()", func() {
+			It("Should return an InformerNotFoundErr if the provided Namespace doesn't exist in the cache", func() {
+				obj, err := nsCache.Get(types.NamespacedName{Namespace: "noinformers", Name: "test"}, appsv1.SchemeGroupVersion.WithKind("Deployment"))
+				Expect(obj).Should(BeNil())
+				Expect(err).ShouldNot(BeNil())
+				Expect(errors.IsInformerNotFoundErr(err)).Should(BeTrue())
+				Expect(err.Error()).Should(Equal("no informers at the namespace level exist for namespace \"noinformers\""))
+			})
+
+			It("Should return an InformerNotFoundErr if no informers for the provided GVK are found in the Namespace", func() {
+				gvk := appsv1.SchemeGroupVersion.WithKind("Deployment")
+				ns := "test-ns"
+				obj, err := nsCache.Get(types.NamespacedName{Namespace: ns, Name: "test"}, gvk)
+				Expect(obj).Should(BeNil())
+				Expect(err).ShouldNot(BeNil())
+				Expect(errors.IsInformerNotFoundErr(err)).Should(BeTrue())
+				Expect(err.Error()).Should(Equal(fmt.Sprintf("no informers at the namespace level exist in namespace %q for GVK %q", ns, gvk)))
+			})
+
+			It("Should return an error if the requested resource could not be found", func() {
+				gvk := corev1.SchemeGroupVersion.WithKind("Pod")
+				ns := "test-ns"
+				obj, err := nsCache.Get(types.NamespacedName{Namespace: ns, Name: "test"}, gvk)
+				Expect(obj).Should(BeNil())
+				Expect(err).ShouldNot(BeNil())
+				Expect(apierrors.IsNotFound(err)).Should(BeTrue())
+			})
+
+			It("Should return the runtime.Object if the resource could be found", func() {
+				gvk := corev1.SchemeGroupVersion.WithKind("Pod")
+				ns := "test-ns"
+				obj, err := nsCache.Get(types.NamespacedName{Namespace: ns, Name: "test-pod-0"}, gvk)
+				Expect(err).Should(BeNil())
+				Expect(obj).ShouldNot(BeNil())
+				pod, ok := obj.(*corev1.Pod)
+				Expect(ok).Should(BeTrue())
+				Expect(pod.Name).Should(Equal("test-pod-0"))
+				Expect(pod.Namespace).Should(Equal(ns))
+				Expect(len(pod.Spec.Containers)).Should(Equal(1))
+				Expect(pod.Spec.Containers[0].Name).Should(Equal("nginx"))
+				Expect(pod.Spec.Containers[0].Image).Should(Equal("nginx:1.14.2"))
+			})
+		})
+
+		When("Listing resources with NamespaceScopedCache.List()", func() {
+			It("Should return an InformerNotFoundError if ListOpts.Namespace doesn't exist in the cache", func() {
+				objs, err := nsCache.List(client.ListOptions{Namespace: "noinformers"}, appsv1.SchemeGroupVersion.WithKind("Deployment"))
+				Expect(objs).Should(BeNil())
+				Expect(err).ShouldNot(BeNil())
+				Expect(errors.IsInformerNotFoundErr(err)).Should(BeTrue())
+				Expect(err.Error()).Should(Equal("no informers at the namespace level exist for namespace \"noinformers\""))
+			})
+
+			It("Should return an InformerNotFoundError if ListOpts.Namespace exists but there is no informer for the GVK", func() {
+				gvk := appsv1.SchemeGroupVersion.WithKind("Deployment")
+				ns := "test-ns"
+				objs, err := nsCache.List(client.ListOptions{Namespace: ns}, gvk)
+				Expect(objs).Should(BeNil())
+				Expect(err).ShouldNot(BeNil())
+				Expect(errors.IsInformerNotFoundErr(err)).Should(BeTrue())
+				Expect(err.Error()).Should(Equal(fmt.Sprintf("no informers at the namespace level exist in namespace %q for GVK %q", ns, gvk)))
+			})
+
+			It("Should return a list of all requested resources from the requested Namespace", func() {
+				gvk := corev1.SchemeGroupVersion.WithKind("Pod")
+				ns := "test-ns"
+				objs, err := nsCache.List(client.ListOptions{Namespace: ns}, gvk)
+				Expect(err).Should(BeNil())
+				Expect(objs).ShouldNot(BeNil())
+				// Due to the nature of this test having to delete
+				// and recreate resources we can't guarantee that there will be
+				// an exact number of resources so we just make sure there are some
+				Expect(len(objs)).Should(BeNumerically(">", 0))
+				for _, obj := range objs {
+					pod, ok := obj.(*corev1.Pod)
+					Expect(ok).Should(BeTrue())
+					Expect(pod.Name).Should(ContainSubstring("test-pod-"))
+					Expect(pod.Namespace).Should(Equal(ns))
+					Expect(len(pod.Spec.Containers)).Should(Equal(1))
+					Expect(pod.Spec.Containers[0].Name).Should(Equal("nginx"))
+					Expect(pod.Spec.Containers[0].Image).Should(Equal("nginx:1.14.2"))
+				}
+			})
+
+			It("Should attempt to list from all namespaces in the cache that contain an informer for this GVK", func() {
+				gvk := corev1.SchemeGroupVersion.WithKind("Pod")
+				objs, err := nsCache.List(client.ListOptions{}, gvk)
+				Expect(err).Should(BeNil())
+				Expect(objs).ShouldNot(BeNil())
+				// Due to the nature of this test having to delete
+				// and recreate resources we can't guarantee that there will be
+				// an exact number of resources so we just make sure there are some
+				Expect(len(objs)).Should(BeNumerically(">", 0))
+				for _, obj := range objs {
+					// verify that each object is a Pod
+					_, ok := obj.(*corev1.Pod)
+					Expect(ok).Should(BeTrue())
+				}
+			})
+		})
+	})
+
 })
 
 // verifyMappings is a helper function to ensure
